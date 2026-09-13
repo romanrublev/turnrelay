@@ -71,18 +71,14 @@ func (p *peerPacketConn) WriteTo(b []byte, _ net.Addr) (int, error) {
 	return p.PacketConn.WriteTo(b, p.peer)
 }
 
-// Temporary stubs until Tasks 5 (srtpWrapper) and 6 (wrapWrapper) land.
+// Temporary stub until Task 6 (wrapWrapper) lands.
 
-type srtpWrapper struct{ timeout time.Duration }
 type wrapWrapper struct {
 	key     []byte
 	video   bool
 	timeout time.Duration
 }
 
-func (w *srtpWrapper) Client(context.Context, net.PacketConn, net.Addr) (net.Conn, error) {
-	return nil, errors.New("not implemented")
-}
 func (w *wrapWrapper) Client(context.Context, net.PacketConn, net.Addr) (net.Conn, error) {
 	return nil, errors.New("not implemented")
 }
