@@ -1,0 +1,6 @@
+/bin/
+/dist/
+*.test
+*.out
+.env
+/test/e2e/*.local.*
