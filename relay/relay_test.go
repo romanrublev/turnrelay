@@ -3,10 +3,12 @@ package relay_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"testing"
 	"time"
 
+	"github.com/pion/stun/v4"
 	"github.com/romanrublev/turnrelay/relay"
 	"github.com/romanrublev/turnrelay/relay/turntest"
 )
@@ -71,6 +73,57 @@ func TestAllocateAuthAndQuotaErrors(t *testing.T) {
 
 func TestAllocateTCP(t *testing.T) {
 	t.Skip("turntest is UDP only; TCP transport is covered by the e2e run against a real relay")
+}
+
+// turnErr builds a *stun.TurnError with the given numeric code, wrapped the
+// same way Allocate wraps errors from turn.Client (fmt.Errorf with %w), so
+// errors.As has to unwrap it just like it would for a real classifier call.
+func turnErr(code stun.ErrorCode) error {
+	// Mirror how turn.Client.AllocateWithContext actually returns this: as
+	// a plain error interface value (relay.Allocate then wraps whatever it
+	// gets back with %w without ever seeing the concrete *stun.TurnError
+	// type), so the static type at this call site matches production.
+	var err error = &stun.TurnError{
+		StunMessageType: stun.NewType(stun.MethodAllocate, stun.ClassErrorResponse),
+		ErrorCodeAttr:   stun.ErrorCodeAttribute{Code: code},
+	}
+	return fmt.Errorf("relay: allocate: %w", err)
+}
+
+func TestClassifiers(t *testing.T) {
+	cases := []struct {
+		name      string
+		err       error
+		wantQuota bool
+		wantAuth  bool
+	}{
+		{"typed 486 is quota", turnErr(486), true, false},
+		{"typed 401 is auth", turnErr(401), false, true},
+		{"typed 438 is auth", turnErr(438), false, true},
+		{"typed 400 is auth", turnErr(400), false, true},
+		{
+			"untyped error with 400 in the address is neither",
+			errors.New("relay: dial udp: 10.0.0.1:3400: connection refused"),
+			false, false,
+		},
+		{
+			"untyped quota response text still matches via the word quota",
+			errors.New("Allocate error response (error 486: Allocation Quota Reached)"),
+			true, false,
+		},
+		{"nil is neither", nil, false, false},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := relay.IsQuotaError(c.err); got != c.wantQuota {
+				t.Errorf("IsQuotaError(%v) = %v, want %v", c.err, got, c.wantQuota)
+			}
+			if got := relay.IsAuthError(c.err); got != c.wantAuth {
+				t.Errorf("IsAuthError(%v) = %v, want %v", c.err, got, c.wantAuth)
+			}
+		})
+	}
 }
 
 func TestRestartKeepsAddress(t *testing.T) {

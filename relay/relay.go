@@ -3,6 +3,7 @@ package relay
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/pion/logging"
+	"github.com/pion/stun/v4"
 	"github.com/pion/transport/v4/stdnet"
 	"github.com/pion/turn/v5"
 )
@@ -121,27 +123,45 @@ func (a *Allocation) Keepalive(ctx context.Context, every time.Duration) {
 	}
 }
 
+// turnCode extracts the STUN/TURN numeric error code from err, if err (or
+// something it wraps) is a *stun.TurnError. turn.Client's AllocateWithContext
+// returns this type directly for any TURN error response (see pion/turn v5.1.1
+// client.go's sendAllocateRequest), and Allocate's fmt.Errorf("...: %w", err)
+// wrapping keeps it reachable via errors.As.
+func turnCode(err error) (int, bool) {
+	var te *stun.TurnError
+	if errors.As(err, &te) {
+		return int(te.ErrorCodeAttr.Code), true
+	}
+	return 0, false
+}
+
 func IsQuotaError(err error) bool {
 	if err == nil {
 		return false
 	}
-	s := err.Error()
-	return strings.Contains(s, "486") || strings.Contains(strings.ToLower(s), "quota")
+	if c, ok := turnCode(err); ok {
+		return c == 486
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "quota")
 }
 
 func IsAuthError(err error) bool {
 	if err == nil {
 		return false
 	}
+	if c, ok := turnCode(err); ok {
+		// 400 is only accepted here as a *typed* TURN error code: pion/turn
+		// v5.1.1's server answers a rejected custom AuthHandler (wrong
+		// username, or a message-integrity/password mismatch) with a bare
+		// 400 rather than the RFC 5389 401; coturn and VK's relays answer
+		// 401. Requiring the typed code (rather than a bare "400" substring
+		// match against err.Error()) keeps this from misclassifying
+		// unrelated failures whose message happens to contain "400", such
+		// as a dial error against a host:port ending in 400.
+		return c == 401 || c == 438 || c == 400
+	}
 	s := strings.ToLower(err.Error())
-	// pion/turn v5.1.1's server sends a bare 400 (Bad Request) with no reason
-	// text when a custom AuthHandler rejects credentials (wrong username or
-	// integrity check failure), instead of the RFC 5389 401 on the final
-	// rejection; the initial challenge round-trip is a 401 too, but that is
-	// handled internally by turn.Client and never surfaces here. "400" is
-	// included so a bad-username/bad-password Allocate is still classified
-	// as an auth error rather than falling through to a generic failure.
-	return strings.Contains(s, "401") || strings.Contains(s, "438") || strings.Contains(s, "400") ||
-		strings.Contains(s, "unauthorized") || strings.Contains(s, "stale nonce") ||
-		strings.Contains(s, "authentication") || strings.Contains(s, "invalid credential")
+	return strings.Contains(s, "unauthorized") || strings.Contains(s, "stale nonce") ||
+		strings.Contains(s, "invalid credential")
 }
