@@ -1,0 +1,13 @@
+turnrelay
+Copyright (c) 2026 Roman Rublev
+
+Licensed under the GNU General Public License v3.0 (see LICENSE).
+
+This project reuses ideas and, where noted in file headers, code from:
+
+- cacggghp/vk-turn-proxy (GPL-3.0): VK credential chain, TURN allocation flow.
+- anton48/vk-turn-proxy-ios (GPL-3.0; pkg/proxy/srtpwrap is MIT): DTLS-SRTP framing,
+  credential pool policy, group hello and probe-echo control frames.
+- amurcanov/proxy-turn-vk-android (GPL-3.0): WDTT-WRAP-v1 envelope.
+
+No code from amurcanov/csqtt (PolyForm Noncommercial 1.0.0) is used.
