@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"unsafe"
 
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/crypto/hkdf"
@@ -89,6 +90,8 @@ func wrapNonce(ssrc uint32, seq uint16, ts uint32) [12]byte {
 	return n
 }
 
+// Wrap encrypts payload into an RTP-looking packet with ChaCha20-Poly1305.
+// The result may or may not share memory with dst.
 func (c *WrapCodec) Wrap(dst, payload []byte) ([]byte, error) {
 	if len(payload) == 0 {
 		return nil, errors.New("obfs: empty payload")
@@ -122,6 +125,9 @@ func (c *WrapCodec) Wrap(dst, payload []byte) ([]byte, error) {
 	return out, nil
 }
 
+// Unwrap decrypts an RTP packet and returns the plaintext payload.
+// It is safe for in-place decoding (dst and wire can be the same buffer).
+// The result may or may not share memory with dst.
 func (c *WrapCodec) Unwrap(dst, wire []byte) ([]byte, error) {
 	if len(wire) < wrapMinWireLen {
 		return nil, errors.New("obfs: wrap packet too short")
@@ -144,7 +150,22 @@ func (c *WrapCodec) Unwrap(dst, wire []byte) ([]byte, error) {
 	ts := binary.BigEndian.Uint32(wire[4:8])
 	ssrc := binary.BigEndian.Uint32(wire[8:12])
 	nonce := wrapNonce(ssrc, seq, ts)
-	plain, err := c.aead.Open(dst[:0], nonce[:], wire[wrapHdrLen:end], wire[:wrapHdrLen])
+
+	// Detect overlap between dst and wire backing arrays.
+	// If they overlap, use a scratch buffer to avoid chacha20poly1305.Open panic.
+	outbuf := dst[:0]
+	if cap(dst) > 0 && cap(wire) > 0 {
+		dstBase := uintptr(unsafe.Pointer(&dst[:cap(dst)][0]))
+		dstEnd := dstBase + uintptr(cap(dst))
+		wireBase := uintptr(unsafe.Pointer(&wire[0]))
+		wireEnd := wireBase + uintptr(len(wire))
+		// Check if ranges [dstBase, dstEnd) and [wireBase, wireEnd) overlap
+		if (dstBase < wireEnd) && (wireBase < dstEnd) {
+			outbuf = make([]byte, 0, len(wire))
+		}
+	}
+
+	plain, err := c.aead.Open(outbuf, nonce[:], wire[wrapHdrLen:end], wire[:wrapHdrLen])
 	if err != nil {
 		return nil, fmt.Errorf("obfs: wrap auth: %w", err)
 	}

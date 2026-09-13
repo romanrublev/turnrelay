@@ -91,3 +91,22 @@ func TestWrapRejects(t *testing.T) {
 		t.Fatal("short key accepted")
 	}
 }
+
+func TestUnwrapInPlace(t *testing.T) {
+	key, _ := DeriveWrapKey("pw")
+	c, _ := NewWrapCodec(key, false)
+	payload := []byte("in-place test payload")
+	buf := make([]byte, 0, 2048)
+	w, err := c.Wrap(buf, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// In-place decode: reuse the same buffer for both wire and dst
+	out, err := c.Unwrap(w[:cap(w)], w)
+	if err != nil {
+		t.Fatalf("in-place unwrap failed: %v", err)
+	}
+	if !bytes.Equal(out, payload) {
+		t.Fatalf("in-place unwrap payload mismatch: got %v, want %v", out, payload)
+	}
+}
