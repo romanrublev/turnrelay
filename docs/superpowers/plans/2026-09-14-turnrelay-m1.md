@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** A Go library `vkturn` whose `Dialer` presents N VK TURN allocations (SRTP or WDTT-WRAP obfuscated) as one UDP datagram pipe usable as a sing-box `N.Dialer`, plus a `turnrelay-udp` CLI, an in-process test harness, a protocol note and a sing-box RFC draft.
+**Goal:** A Go library `turnrelay` whose `Dialer` presents N TURN allocations (credentials from VK Calls or a static relay) (SRTP or WDTT-WRAP obfuscated) as one UDP datagram pipe usable as a sing-box `N.Dialer`, plus a `turnrelay-udp` CLI, an in-process test harness, a protocol note and a sing-box RFC draft.
 
-**Architecture:** Bottom-up layers, each its own package with an in-process test peer: `obfs` (per-allocation DTLS / DTLS-SRTP / WDTT-WRAP conn), `relay` (pion/turn allocation), `creds` + `credpool` (VK credential chain and quota-aware pool), `mux` (N workers, work-stealing uplink, merged downlink, hello/probe control plane), `vkturn` (public Dialer). Tests never touch VK: pion/turn's server package plays the relay, `obfstest` plays the VPS server.
+**Architecture:** Bottom-up layers, each its own package with an in-process test peer: `obfs` (per-allocation DTLS / DTLS-SRTP / WDTT-WRAP conn), `relay` (pion/turn allocation), `provider/vk` + `provider/static` + `credpool` (credential sources and a quota-aware pool), `mux` (N workers, work-stealing uplink, merged downlink, hello/probe control plane), `turnrelay` (public Dialer at the module root). Tests never touch VK: pion/turn's server package plays the relay, `obfstest` plays the VPS server.
 
 **Tech Stack:** Go 1.25+, pion/turn v5, pion/dtls v3, pion/srtp v3, pion/rtp, bogdanfinn/tls-client (Chrome TLS fingerprint for VK API), golang.org/x/crypto (HKDF, ChaCha20-Poly1305), sagernet/sing (`M.Socksaddr`, `N.Dialer`).
 
@@ -13,7 +13,8 @@
 ## Global Constraints
 
 - Module path `github.com/romanrublev/turnrelay`, license GPL-3.0, provenance in `NOTICE`.
-- Public API lives in package `vkturn` (dir `vkturn/`); subpackages `obfs`, `relay`, `provider/vk`, `credpool`, `mux`.
+- Public API lives in package `turnrelay` at the module root; subpackages `obfs`, `relay`, `provider`, `provider/vk`, `provider/static`, `credpool`, `mux`.
+- Names follow the mechanism, not the carrier: no `vk` in type names, flags or config keys except the provider value `"vk"` and VK-specific fields (`call_link`).
 - Defaults: `Connections` 30 (max 60), `Mode` srtp, TURN transport UDP, probe every 30 s, zombie after 120 s, worker start pacing 100 ms, at most 3 obfs handshakes in flight, uplink queue 256, downlink queue 2048, 10 connections per credential, credential TTL 10 min minus 60 s margin, 3-6 s cooldown between credential fetches.
 - Control frames: hello `ff 47 52 50` + 16-byte session id (20 bytes); probe `ff 50 4e 47` + 8-byte big-endian sequence (12 bytes).
 - WRAP-v1: key = HKDF-SHA256(secret=password, salt="WDTT-WRAP-v1", info="rtp-obfs/chacha20poly1305"), RTP header V=2 P=1 PT=111 (audio) or 96 (video), nonce = ssrc(4) || seq(2) || 0x0000 || ts(4), aad = 12-byte header, padding 1..24 bytes (audio) or 1..60 (video), last byte = padding length.
@@ -28,40 +29,44 @@
 
 ```
 go.mod, LICENSE, NOTICE, README.md, Makefile, .github/workflows/ci.yml
-vkturn/
-  dialer.go            Config, Dialer, New, Start, Close, DialContext, ListenPacket, Stats
-  conn.go              datagramConn (net.Conn) and packetConn (net.PacketConn) over mux.Pool
-  dialer_test.go       in-process end to end: pion turn server + obfstest server + Dialer
-  obfs/
-    obfs.go            Mode, Options, Wrapper interface, New()
-    dtls.go            legacy DTLS wrapper (client side)
-    wrapv1.go          WDTT-WRAP-v1 codec: DeriveKey, Codec.Wrap/Unwrap, IsRTP
-    wrapv1_test.go
-    wrap.go            wrap Wrapper: codec PacketConn adapter + DTLS
-    srtp.go            DTLS-SRTP wrapper: demux, RTP framing, SRTP contexts
-    srtp_test.go, dtls_test.go, wrap_test.go
-    obfstest/
-      server.go        Listen{DTLS,SRTP,Wrap}: in-process servers returning net.Conn per client
-  relay/
-    relay.go           Allocate(ctx, Options) (*Allocation, error); peerConn; errors
-    relay_test.go      against pion/turn server
-    turntest/
-      server.go        Start(t) -> in-process pion/turn server with static credential
-  creds/
-    creds.go           Credential, Client, Fetch, Doer, Endpoints, apps list
-    captcha.go         CaptchaRequiredError, parseVKError
+doc.go                 package turnrelay
+dialer.go              Config, Dialer, New, Start, Close, DialContext, ListenPacket, Stats
+conn.go                datagramConn (net.Conn) and packetConn (net.PacketConn) over mux.Pool
+dialer_test.go         in-process end to end: pion turn server + obfstest server + Dialer
+obfs/
+  obfs.go              Mode, Options, Wrapper interface, New()
+  dtls.go              legacy DTLS wrapper (client side)
+  wrapv1.go            WDTT-WRAP-v1 codec: DeriveWrapKey, WrapCodec.Wrap/Unwrap, IsWrapRTP
+  wrapv1_test.go
+  wrap.go              wrap Wrapper: codec PacketConn adapter + DTLS
+  srtp.go              DTLS-SRTP wrapper: demux, RTP framing, SRTP contexts
+  srtp_test.go, dtls_test.go, wrap_test.go
+  obfstest/
+    server.go          Listen{DTLS,SRTP,Wrap}: in-process servers returning net.Conn per client
+relay/
+  relay.go             Allocate(ctx, Options) (*Allocation, error); errors
+  relay_test.go        against pion/turn server
+  turntest/
+    server.go          Start(t) -> in-process pion/turn server with static credential
+provider/
+  provider.go          Credential, CaptchaRequiredError, IsCaptcha
+  vk/
+    client.go          Client, Fetch, Doer, Endpoints, apps list
+    captcha.go         vkAPIError -> CaptchaRequiredError
     link.go            ParseCallLink
     namegen.go         random display names
-    creds_test.go      fake Doer with canned responses
-  credpool/
-    pool.go            Pool, Options, Lease, Acquire, error classification hooks
-    pool_test.go
-  mux/
-    control.go         hello/probe encode/parse
-    control_test.go
-    worker.go          one allocation lifecycle
-    pool.go            Pool: Start/Close/Write/Read/Stats, work stealing
-    pool_test.go       against turntest + obfstest
+    client_test.go     fake Doer with canned responses
+  static/
+    static.go          Fetcher for a fixed relay credential
+credpool/
+  pool.go              Pool, Options, Lease, Acquire, error classification hooks
+  pool_test.go
+mux/
+  control.go           hello/probe encode/parse
+  control_test.go
+  worker.go            one allocation lifecycle
+  pool.go              Pool: Start/Close/Write/Read/Stats, work stealing
+  pool_test.go         against turntest + obfstest
 cmd/turnrelay-udp/main.go
 test/integration/     docker compose interop with the real anton48 server (manual)
 scripts/vps-setup.sh  server side runbook for e2e
@@ -116,7 +121,7 @@ License: GPL-3.0. Provenance: see NOTICE.
 
 `doc.go`:
 ```go
-// Package vkturn presents N VK TURN allocations, each wrapped in an
+// Package turnrelay presents N TURN allocations, each wrapped in an
 // obfuscation layer that mimics WebRTC media, as a single UDP datagram pipe.
 //
 // The Dialer implements the DialContext/ListenPacket pair used by sing-box
@@ -158,7 +163,7 @@ jobs:
 - [ ] **Step 4: Verify the module builds**
 
 Run: `go build ./... && go vet ./...`
-Expected: no output (doc.go only).
+Expected: no output (doc.go only). Note `package turnrelay` at the module root.
 
 - [ ] **Step 5: Commit**
 
@@ -1794,17 +1799,21 @@ git add relay && git commit -m "relay: turn allocation with keepalive and in-pro
 
 ---
 
-### Task 8: VK credential chain
+### Task 8: Credential providers (provider, provider/static, provider/vk)
 
 **Files:**
-- Create: `vkturn/creds/creds.go`, `vkturn/creds/captcha.go`, `vkturn/creds/link.go`, `vkturn/creds/namegen.go`, `vkturn/creds/creds_test.go`
+- Create: `provider/provider.go`, `provider/static/static.go`, `provider/vk/client.go`, `provider/vk/captcha.go`, `provider/vk/link.go`, `provider/vk/namegen.go`, `provider/vk/client_test.go`
 
 **Interfaces:**
-- Produces:
+- Produces in `provider` (carrier-neutral):
   - `type Credential struct { Username, Password string; Relays []string /* host:port, transport=tcp entries dropped */; Link string; FetchedAt time.Time }`
   - `func (c Credential) Relay(i int) string` (round-robin pick)
   - `type CaptchaRequiredError struct { Sid, RedirectURI, SessionToken, Img string }` with `Error()`
   - `func IsCaptcha(err error) bool`
+  - `type Fetcher func(ctx context.Context, link string) (Credential, error)` (credpool re-exports this type)
+- Produces in `provider/static`:
+  - `func New(server, username, password string) provider.Fetcher` (ignores the link argument)
+- Produces in `provider/vk`:
   - `type Doer interface { Do(*fhttp.Request) (*fhttp.Response, error) }`
   - `type Endpoints struct { Login, API, OK string }`; `var DefaultEndpoints`
   - `type Client struct { HTTP Doer; Endpoints Endpoints; Sleep func(time.Duration); Logf func(string, ...any) }`
@@ -1812,10 +1821,75 @@ git add relay && git commit -m "relay: turn allocation with keepalive and in-pro
   - `func (c *Client) Fetch(ctx context.Context, link string) (Credential, error)`
   - `func ParseCallLink(s string) (string, error)` returns the hash for `https://vk.ru/call/join/<hash>`, `vk.com`, bare hash
 
-- [ ] **Step 1: Write link.go and its test first**
+- [ ] **Step 0: Write provider/provider.go and provider/static/static.go**
 
 ```go
-package creds
+// Package provider defines what a credential source hands to the pool.
+package provider
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+)
+
+type Credential struct {
+	Username  string
+	Password  string
+	Relays    []string // host:port; TCP-only entries are dropped by providers
+	Link      string   // provider-specific source id (call link hash, "static")
+	FetchedAt time.Time
+}
+
+func (c Credential) Relay(i int) string {
+	if len(c.Relays) == 0 {
+		return ""
+	}
+	return c.Relays[i%len(c.Relays)]
+}
+
+type Fetcher func(ctx context.Context, link string) (Credential, error)
+
+// CaptchaRequiredError: the provider needs a human. The library never solves
+// captchas; callers cool down or surface it.
+type CaptchaRequiredError struct {
+	Sid, RedirectURI, SessionToken, Img string
+}
+
+func (e *CaptchaRequiredError) Error() string {
+	return fmt.Sprintf("provider: captcha required (sid %s)", e.Sid)
+}
+
+func IsCaptcha(err error) bool {
+	var ce *CaptchaRequiredError
+	return errors.As(err, &ce)
+}
+```
+
+```go
+// Package static returns one fixed credential: self-hosted coturn, or a
+// relay whose credentials were obtained elsewhere.
+package static
+
+import (
+	"context"
+	"time"
+
+	"github.com/romanrublev/turnrelay/provider"
+)
+
+func New(server, username, password string) provider.Fetcher {
+	return func(context.Context, string) (provider.Credential, error) {
+		return provider.Credential{Username: username, Password: password, Relays: []string{server}, Link: "static", FetchedAt: time.Now()}, nil
+	}
+}
+```
+
+- [ ] **Step 1: Write provider/vk/link.go and its test first**
+
+```go
+package vk
 
 import (
 	"errors"
@@ -1827,7 +1901,7 @@ import (
 func ParseCallLink(s string) (string, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
-		return "", errors.New("creds: empty call link")
+		return "", errors.New("vk: empty call link")
 	}
 	if i := strings.Index(s, "join/"); i >= 0 {
 		s = s[i+len("join/"):]
@@ -1836,7 +1910,7 @@ func ParseCallLink(s string) (string, error) {
 		s = s[:i]
 	}
 	if len(s) < 8 || strings.ContainsAny(s, " \t") {
-		return "", errors.New("creds: malformed call link")
+		return "", errors.New("vk: malformed call link")
 	}
 	return s, nil
 }
@@ -1863,10 +1937,10 @@ func TestParseCallLink(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Write the fake-Doer test for Fetch**
+- [ ] **Step 2: Write the fake-Doer test for Fetch (provider/vk/client_test.go)**
 
 ```go
-package creds
+package vk
 
 import (
 	"context"
@@ -1877,6 +1951,8 @@ import (
 	"testing"
 
 	fhttp "github.com/bogdanfinn/fhttp"
+
+	"github.com/romanrublev/turnrelay/provider"
 )
 
 type fakeDoer struct {
@@ -1946,8 +2022,8 @@ func TestFetchCaptcha(t *testing.T) {
 		"api.vk.ru/method/calls.getAnonymousToken": `{"error":{"error_code":14,"error_msg":"Captcha needed","captcha_sid":"123","captcha_img":"https://id.vk.ru/captcha","redirect_uri":"https://id.vk.ru/not_robot?session_token=ST&x=1"}}`,
 	}}
 	_, err := newTestClient(d).Fetch(context.Background(), "AbCdEf123456")
-	var ce *CaptchaRequiredError
-	if !errors.As(err, &ce) || !IsCaptcha(err) || ce.SessionToken != "ST" || ce.Sid != "123" {
+	var ce *provider.CaptchaRequiredError
+	if !errors.As(err, &ce) || !provider.IsCaptcha(err) || ce.SessionToken != "ST" || ce.Sid != "123" {
 		t.Fatalf("want captcha error, got %v", err)
 	}
 }
@@ -1959,7 +2035,7 @@ func TestFetchAPIError(t *testing.T) {
 		"api.vk.ru/method/calls.getAnonymousToken": `{"error":{"error_code":29,"error_msg":"Rate limit reached"}}`,
 	}}
 	_, err := newTestClient(d).Fetch(context.Background(), "AbCdEf123456")
-	if err == nil || IsCaptcha(err) || !strings.Contains(err.Error(), "29") {
+	if err == nil || provider.IsCaptcha(err) || !strings.Contains(err.Error(), "29") {
 		t.Fatalf("got %v", err)
 	}
 }
@@ -1969,41 +2045,28 @@ Note: `Fetch` tries each VK app id in turn; on captcha it must stop immediately 
 
 - [ ] **Step 3: Run to verify failure**
 
-Run: `go test ./creds/ -v`
+Run: `go test ./provider/... -v`
 Expected: FAIL (undefined symbols).
 
-- [ ] **Step 4: Write captcha.go and namegen.go**
+- [ ] **Step 4: Write provider/vk/captcha.go and namegen.go**
 
 ```go
-package creds
+package vk
 
 import (
-	"errors"
 	"fmt"
 	neturl "net/url"
+
+	"github.com/romanrublev/turnrelay/provider"
 )
 
-// CaptchaRequiredError is VK API error 14 on calls.getAnonymousToken. The
-// library does not solve captchas; callers decide (cool down, ask a human).
-type CaptchaRequiredError struct {
-	Sid, RedirectURI, SessionToken, Img string
-}
-
-func (e *CaptchaRequiredError) Error() string {
-	return fmt.Sprintf("creds: VK captcha required (sid %s)", e.Sid)
-}
-
-func IsCaptcha(err error) bool {
-	var ce *CaptchaRequiredError
-	return errors.As(err, &ce)
-}
-
 // vkAPIError turns the "error" object of a VK API response into an error.
+// Error 14 on calls.getAnonymousToken is VK Smart Captcha.
 func vkAPIError(obj map[string]any) error {
 	code, _ := obj["error_code"].(float64)
 	msg, _ := obj["error_msg"].(string)
 	if int(code) == 14 {
-		ce := &CaptchaRequiredError{Img: str(obj["captcha_img"]), RedirectURI: str(obj["redirect_uri"])}
+		ce := &provider.CaptchaRequiredError{Img: str(obj["captcha_img"]), RedirectURI: str(obj["redirect_uri"])}
 		switch v := obj["captcha_sid"].(type) {
 		case string:
 			ce.Sid = v
@@ -2015,7 +2078,7 @@ func vkAPIError(obj map[string]any) error {
 		}
 		return ce
 	}
-	return fmt.Errorf("creds: VK API error %d: %s", int(code), msg)
+	return fmt.Errorf("vk: API error %d: %s", int(code), msg)
 }
 
 func str(v any) string { s, _ := v.(string); return s }
@@ -2023,13 +2086,13 @@ func str(v any) string { s, _ := v.(string); return s }
 
 `namegen.go`: a `func randomName() string` returning "<First> <Last>" from two short Russian/English lists (20 entries each) chosen with `math/rand/v2`; VK shows this name as the participant.
 
-- [ ] **Step 5: Write creds.go**
+- [ ] **Step 5: Write provider/vk/client.go**
 
 ```go
-// Package creds obtains VK TURN credentials from a call link, the way the VK
+// Package vk obtains TURN credentials from a VK Calls link, the way the VK
 // web client does it (anonymous join). Chain and app ids follow
 // cacggghp/vk-turn-proxy (GPL-3.0).
-package creds
+package vk
 
 import (
 	"bytes"
@@ -2046,22 +2109,11 @@ import (
 	tlsclient "github.com/bogdanfinn/tls-client"
 	"github.com/bogdanfinn/tls-client/profiles"
 	"github.com/google/uuid"
+
+	"github.com/romanrublev/turnrelay/provider"
 )
 
-type Credential struct {
-	Username  string
-	Password  string
-	Relays    []string
-	Link      string
-	FetchedAt time.Time
-}
-
-func (c Credential) Relay(i int) string {
-	if len(c.Relays) == 0 {
-		return ""
-	}
-	return c.Relays[i%len(c.Relays)]
-}
+type Credential = provider.Credential
 
 type Doer interface {
 	Do(*fhttp.Request) (*fhttp.Response, error)
@@ -2126,7 +2178,7 @@ func NewClient() (*Client, error) {
 		tlsclient.WithDialer(publicResolverDialer()),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("creds: http client: %w", err)
+		return nil, fmt.Errorf("vk: http client: %w", err)
 	}
 	return &Client{HTTP: hc, Endpoints: DefaultEndpoints, Sleep: time.Sleep, Logf: func(string, ...any) {}}, nil
 }
@@ -2159,7 +2211,7 @@ func (c *Client) post(ctx context.Context, url, form string) (map[string]any, er
 	}
 	var m map[string]any
 	if err := json.Unmarshal(body, &m); err != nil {
-		return nil, fmt.Errorf("creds: %s: bad json: %w", url, err)
+		return nil, fmt.Errorf("vk: %s: bad json: %w", url, err)
 	}
 	return m, nil
 }
@@ -2173,13 +2225,13 @@ func (c *Client) Fetch(ctx context.Context, link string) (Credential, error) {
 		if err == nil {
 			return cred, nil
 		}
-		if IsCaptcha(err) {
+		if provider.IsCaptcha(err) {
 			return Credential{}, err
 		}
-		c.Logf("creds: app %s: %v", a.id, err)
+		c.Logf("vk: app %s: %v", a.id, err)
 		last = err
 	}
-	return Credential{}, fmt.Errorf("creds: all VK app ids failed: %w", last)
+	return Credential{}, fmt.Errorf("vk: all app ids failed: %w", last)
 }
 
 func (c *Client) fetchWith(ctx context.Context, link string, a app) (Credential, error) {
@@ -2192,7 +2244,7 @@ func (c *Client) fetchWith(ctx context.Context, link string, a app) (Credential,
 	data, _ := r["data"].(map[string]any)
 	token1 := str(data["access_token"])
 	if token1 == "" {
-		return Credential{}, fmt.Errorf("creds: no access_token in %v", r)
+		return Credential{}, fmt.Errorf("vk: no access_token in %v", r)
 	}
 	c.Sleep(120 * time.Millisecond)
 	joinURL := "https://vk.com/call/join/" + link
@@ -2210,7 +2262,7 @@ func (c *Client) fetchWith(ctx context.Context, link string, a app) (Credential,
 	resp, _ := r["response"].(map[string]any)
 	token2 := str(resp["token"])
 	if token2 == "" {
-		return Credential{}, fmt.Errorf("creds: no token in %v", r)
+		return Credential{}, fmt.Errorf("vk: no token in %v", r)
 	}
 	c.Sleep(120 * time.Millisecond)
 	// 4. OK calls session
@@ -2221,7 +2273,7 @@ func (c *Client) fetchWith(ctx context.Context, link string, a app) (Credential,
 	}
 	token3 := str(r["session_key"])
 	if token3 == "" {
-		return Credential{}, fmt.Errorf("creds: no session_key in %v", r)
+		return Credential{}, fmt.Errorf("vk: no session_key in %v", r)
 	}
 	c.Sleep(120 * time.Millisecond)
 	// 5. join -> TURN credentials
@@ -2244,7 +2296,7 @@ func (c *Client) fetchWith(ctx context.Context, link string, a app) (Credential,
 		cred.Relays = append(cred.Relays, s)
 	}
 	if cred.Username == "" || cred.Password == "" || len(cred.Relays) == 0 {
-		return Credential{}, fmt.Errorf("creds: incomplete turn_server in %v", r)
+		return Credential{}, fmt.Errorf("vk: incomplete turn_server in %v", r)
 	}
 	return cred, nil
 }
@@ -2252,13 +2304,13 @@ func (c *Client) fetchWith(ctx context.Context, link string, a app) (Credential,
 
 - [ ] **Step 6: Run tests**
 
-Run: `go mod tidy && go test -race ./creds/ -v`
+Run: `go mod tidy && go test -race ./provider/... -v`
 Expected: PASS (4 tests).
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add go.mod go.sum vkturn/creds && git commit -m "creds: VK anonymous-join credential chain with captcha detection"
+git add go.mod go.sum provider && git commit -m "provider: credential interface, static provider, VK anonymous-join chain"
 ```
 
 ---
@@ -2270,7 +2322,7 @@ git add go.mod go.sum vkturn/creds && git commit -m "creds: VK anonymous-join cr
 
 **Interfaces:**
 - Produces:
-  - `type Fetcher func(ctx context.Context, link string) (provider.Credential, error)`
+  - `type Fetcher = provider.Fetcher`
   - `type Options struct { Links []string; ConnsPerSlot int; TTL, Margin, CooldownMin, CooldownMax, CaptchaCooldown time.Duration; Now func() time.Time; Sleep func(context.Context, time.Duration) error; Logf func(string, ...any) }`
   - `type Lease struct { Cred provider.Credential; Slot int; Index int /* 0..ConnsPerSlot-1 within slot, use for Relay(i) */ }`
   - `func New(f Fetcher, o Options) *Pool`
@@ -2292,7 +2344,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/romanrublev/turnrelay/provider/vk"
+	"github.com/romanrublev/turnrelay/provider"
 )
 
 func opts() Options {
@@ -2433,11 +2485,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/romanrublev/turnrelay/provider/vk"
+	"github.com/romanrublev/turnrelay/provider"
 	"github.com/romanrublev/turnrelay/relay"
 )
 
-type Fetcher func(ctx context.Context, link string) (provider.Credential, error)
+type Fetcher = provider.Fetcher
 
 type Options struct {
 	Links           []string
@@ -2703,7 +2755,7 @@ import (
 	"time"
 
 	"github.com/romanrublev/turnrelay/credpool"
-	"github.com/romanrublev/turnrelay/provider/vk"
+	"github.com/romanrublev/turnrelay/provider"
 	"github.com/romanrublev/turnrelay/mux"
 	"github.com/romanrublev/turnrelay/obfs"
 	"github.com/romanrublev/turnrelay/obfs/obfstest"
@@ -3255,30 +3307,33 @@ git add mux relay/turntest && git commit -m "mux: worker pool with work-stealing
 
 ---
 
-### Task 11: Public Dialer (vkturn package)
+### Task 11: Public Dialer (turnrelay package)
 
 **Files:**
 - Create: `dialer.go`, `conn.go`, `dialer_test.go`
 
 **Interfaces:**
-- Consumes: creds.Client, credpool.Pool, obfs.New, mux.Pool.
+- Consumes: provider.Fetcher, vk.NewClient, static.New, credpool.Pool, obfs.New, mux.Pool.
 - Produces (the API sing-box will call):
   ```go
   type Mode = obfs.Mode
   type CaptchaPolicy string // "fail" (default) | "wait"
   type Config struct {
-      CallLinks    []string
+      Provider     string        // "vk" (default) | "static"
+      CallLinks    []string      // vk
+      TURNServer   string        // static: relay host:port; vk: optional override
+      TURNUsername string        // static
+      TURNPassword string        // static
       Server       netip.AddrPort
       Connections  int
       Mode         Mode
       Password     string
       WrapKey      []byte
       TURNUDP      *bool         // nil means true
-      TURNOverride string
       Captcha      CaptchaPolicy
       Logf         func(string, ...any)
-      // test hooks
-      Fetcher      credpool.Fetcher
+      // test hook: replaces the provider entirely
+      Fetcher      provider.Fetcher
   }
   type Stats struct { Workers, Active, Connecting, Restarts int; CredSlots int; CaptchaUntil time.Time; LastError string }
   type Dialer struct{ ... }
@@ -3291,7 +3346,7 @@ git add mux relay/turntest && git commit -m "mux: worker pool with work-stealing
   func (d *Dialer) WaitReady(ctx context.Context, n int) error
   ```
   `DialContext` accepts only `"udp"`, `"udp4"`, `"udp6"`; anything else returns `ErrTCPUnsupported`. The returned `net.Conn` is a datagram conn; `ListenPacket` wraps the same pipe as a `net.PacketConn` whose `ReadFrom` reports `Server` as the source and whose `WriteTo` ignores the address.
-  Validation errors: no links, invalid link, invalid server, `Connections` > 60, wrap mode without password/key.
+  Validation errors: unknown provider, vk without links or with an invalid link, static without server/username/password, invalid server, `Connections` > 60, wrap mode without password/key.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -3308,7 +3363,7 @@ import (
 	M "github.com/sagernet/sing/common/metadata"
 
 	"github.com/romanrublev/turnrelay"
-	"github.com/romanrublev/turnrelay/provider/vk"
+	"github.com/romanrublev/turnrelay/provider"
 	"github.com/romanrublev/turnrelay/mux"
 	"github.com/romanrublev/turnrelay/obfs/obfstest"
 	"github.com/romanrublev/turnrelay/relay/turntest"
@@ -3431,12 +3486,14 @@ func TestListenPacket(t *testing.T) {
 func TestConfigValidation(t *testing.T) {
 	base := turnrelay.Config{CallLinks: []string{"https://vk.ru/call/join/TESTLINK1234"}, Server: netip.MustParseAddrPort("203.0.113.5:56004")}
 	cases := map[string]func(*turnrelay.Config){
-		"no links":     func(c *turnrelay.Config) { c.CallLinks = nil },
-		"bad link":     func(c *turnrelay.Config) { c.CallLinks = []string{"x"} },
-		"no server":    func(c *turnrelay.Config) { c.Server = netip.AddrPort{} },
-		"too many":     func(c *turnrelay.Config) { c.Connections = 61 },
-		"wrap no key":  func(c *turnrelay.Config) { c.Mode = turnrelay.ModeWrap },
-		"bad mode":     func(c *turnrelay.Config) { c.Mode = "plain" },
+		"no links":       func(c *turnrelay.Config) { c.CallLinks = nil },
+		"bad link":       func(c *turnrelay.Config) { c.CallLinks = []string{"x"} },
+		"bad provider":   func(c *turnrelay.Config) { c.Provider = "yandex" },
+		"static no user": func(c *turnrelay.Config) { c.Provider = "static"; c.TURNServer = "1.2.3.4:3478" },
+		"no server":      func(c *turnrelay.Config) { c.Server = netip.AddrPort{} },
+		"too many":       func(c *turnrelay.Config) { c.Connections = 61 },
+		"wrap no key":    func(c *turnrelay.Config) { c.Mode = turnrelay.ModeWrap },
+		"bad mode":       func(c *turnrelay.Config) { c.Mode = "plain" },
 	}
 	for name, mutate := range cases {
 		c := base
@@ -3447,6 +3504,10 @@ func TestConfigValidation(t *testing.T) {
 	}
 	if _, err := turnrelay.New(base); err != nil {
 		t.Fatalf("valid config rejected: %v", err)
+	}
+	st := turnrelay.Config{Provider: "static", TURNServer: "1.2.3.4:3478", TURNUsername: "u", TURNPassword: "p", Server: base.Server}
+	if _, err := turnrelay.New(st); err != nil {
+		t.Fatalf("valid static config rejected: %v", err)
 	}
 }
 ```
@@ -3473,6 +3534,8 @@ import (
 	M "github.com/sagernet/sing/common/metadata"
 
 	"github.com/romanrublev/turnrelay/credpool"
+	"github.com/romanrublev/turnrelay/provider"
+	"github.com/romanrublev/turnrelay/provider/static"
 	"github.com/romanrublev/turnrelay/provider/vk"
 	"github.com/romanrublev/turnrelay/mux"
 	"github.com/romanrublev/turnrelay/obfs"
@@ -3498,18 +3561,26 @@ const (
 
 var ErrTCPUnsupported = errors.New("turnrelay: only udp is supported; put a wireguard endpoint on top")
 
+const (
+	ProviderVK     = "vk"
+	ProviderStatic = "static"
+)
+
 type Config struct {
+	Provider     string
 	CallLinks    []string
+	TURNServer   string
+	TURNUsername string
+	TURNPassword string
 	Server       netip.AddrPort
 	Connections  int
 	Mode         Mode
 	Password     string
 	WrapKey      []byte
 	TURNUDP      *bool
-	TURNOverride string
 	Captcha      CaptchaPolicy
 	Logf         func(string, ...any)
-	Fetcher      credpool.Fetcher // nil: real VK client
+	Fetcher      provider.Fetcher // nil: build from Provider
 }
 
 type Stats struct {
@@ -3531,16 +3602,45 @@ func New(cfg Config) (*Dialer, error) {
 	if cfg.Logf == nil {
 		cfg.Logf = func(string, ...any) {}
 	}
-	if len(cfg.CallLinks) == 0 {
-		return nil, errors.New("turnrelay: at least one call link is required")
+	if cfg.Provider == "" {
+		cfg.Provider = ProviderVK
 	}
-	var links []string
-	for _, l := range cfg.CallLinks {
-		h, err := vk.ParseCallLink(l)
-		if err != nil {
-			return nil, fmt.Errorf("turnrelay: %w", err)
+	var (
+		links    []string
+		fetcher  = cfg.Fetcher
+		override string
+	)
+	switch cfg.Provider {
+	case ProviderVK:
+		if len(cfg.CallLinks) == 0 {
+			return nil, errors.New("turnrelay: provider vk needs at least one call link")
 		}
-		links = append(links, h)
+		for _, l := range cfg.CallLinks {
+			h, err := vk.ParseCallLink(l)
+			if err != nil {
+				return nil, fmt.Errorf("turnrelay: %w", err)
+			}
+			links = append(links, h)
+		}
+		override = cfg.TURNServer
+		if fetcher == nil {
+			client, err := vk.NewClient()
+			if err != nil {
+				return nil, err
+			}
+			client.Logf = cfg.Logf
+			fetcher = client.Fetch
+		}
+	case ProviderStatic:
+		if cfg.TURNServer == "" || cfg.TURNUsername == "" || cfg.TURNPassword == "" {
+			return nil, errors.New("turnrelay: provider static needs turn server, username and password")
+		}
+		links = []string{"static"}
+		if fetcher == nil {
+			fetcher = static.New(cfg.TURNServer, cfg.TURNUsername, cfg.TURNPassword)
+		}
+	default:
+		return nil, fmt.Errorf("turnrelay: unknown provider %q", cfg.Provider)
 	}
 	if !cfg.Server.IsValid() || cfg.Server.Port() == 0 {
 		return nil, errors.New("turnrelay: server address is required")
@@ -3568,15 +3668,6 @@ func New(cfg Config) (*Dialer, error) {
 	// reports the captcha, cools down for a minute, and workers retry with
 	// backoff. "wait" is accepted so configs stay valid once M2 wires a
 	// callback for graphical clients.
-	fetcher := cfg.Fetcher
-	if fetcher == nil {
-		client, err := vk.NewClient()
-		if err != nil {
-			return nil, err
-		}
-		client.Logf = cfg.Logf
-		fetcher = client.Fetch
-	}
 	udp := true
 	if cfg.TURNUDP != nil {
 		udp = *cfg.TURNUDP
@@ -3585,7 +3676,7 @@ func New(cfg Config) (*Dialer, error) {
 	d.creds = credpool.New(fetcher, credpool.Options{Links: links, Logf: cfg.Logf})
 	d.pool = mux.New(mux.Options{
 		Workers: cfg.Connections, Peer: d.peer, Wrapper: wrapper, Creds: d.creds,
-		TURNUDP: udp, TURNOverride: cfg.TURNOverride, Logf: cfg.Logf,
+		TURNUDP: udp, TURNOverride: override, Logf: cfg.Logf,
 	})
 	return d, nil
 }
@@ -3735,13 +3826,13 @@ A subtlety: `SetReadDeadline` cancels the previous context, which would make an 
 
 - [ ] **Step 5: Run tests**
 
-Run: `go test -race ./ -v -timeout 120s`
+Run: `go test -race . -v -timeout 120s`
 Expected: PASS (3 tests).
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add vkturn && git commit -m "turnrelay: public dialer with datagram conn and packet conn"
+git add dialer.go conn.go dialer_test.go && git commit -m "turnrelay: public dialer with datagram conn and packet conn"
 ```
 
 ---
@@ -3753,7 +3844,7 @@ git add vkturn && git commit -m "turnrelay: public dialer with datagram conn and
 
 **Interfaces:**
 - Consumes: `turnrelay.New/Start/DialContext/Stats`.
-- Produces: binary `turnrelay-udp` with flags `-listen 127.0.0.1:9000`, `-link` (repeatable), `-server host:port`, `-n 30`, `-mode srtp|wrap|dtls`, `-password`, `-wrap-key hex`, `-turn host:port` (override), `-tcp` (TURN over TCP), `-stats 10s`. It forwards datagrams from the local socket into the pipe and returns downlink datagrams to the last local sender (the same local-peer scheme as cacggghp's client, so wg-quick with `Endpoint = 127.0.0.1:9000` works unchanged).
+- Produces: binary `turnrelay-udp` with flags `-listen 127.0.0.1:9000`, `-provider vk|static`, `-link` (repeatable, vk), `-turn host:port` (static relay, or override for vk), `-turn-user`, `-turn-pass` (static), `-server host:port`, `-n 30`, `-mode srtp|wrap|dtls`, `-password`, `-wrap-key hex`, `-tcp` (TURN over TCP), `-stats 10s`. It forwards datagrams from the local socket into the pipe and returns downlink datagrams to the last local sender (the same local-peer scheme as cacggghp's client, so wg-quick with `Endpoint = 127.0.0.1:9000` works unchanged).
 
 - [ ] **Step 1: Write main.go**
 
@@ -3790,13 +3881,16 @@ func (l *links) Set(s string) error { *l = append(*l, s); return nil }
 func main() {
 	var ls links
 	listen := flag.String("listen", "127.0.0.1:9000", "local UDP socket for the WireGuard client")
-	flag.Var(&ls, "link", "VK call link (repeatable)")
-	server := flag.String("server", "", "VPS host:port running the vk-turn-proxy server")
+	prov := flag.String("provider", "vk", "credential provider: vk | static")
+	flag.Var(&ls, "link", "VK call link (repeatable, provider vk)")
+	turnUser := flag.String("turn-user", "", "relay username (provider static)")
+	turnPass := flag.String("turn-pass", "", "relay password (provider static)")
+	server := flag.String("server", "", "VPS host:port running the relay-side server")
 	n := flag.Int("n", turnrelay.DefaultConnections, "TURN allocations (each 10 = one VK participant)")
 	mode := flag.String("mode", "srtp", "srtp | wrap | dtls")
 	password := flag.String("password", "", "wrap mode: tunnel password")
 	wrapKey := flag.String("wrap-key", "", "wrap mode: raw 32-byte key, hex")
-	turnOverride := flag.String("turn", "", "override TURN relay host:port")
+	turnServer := flag.String("turn", "", "TURN relay host:port (required for static, optional override for vk)")
 	tcp := flag.Bool("tcp", false, "use TCP to the TURN relay (slower)")
 	statsEvery := flag.Duration("stats", 10*time.Second, "stats log interval")
 	flag.Parse()
@@ -3813,8 +3907,9 @@ func main() {
 	}
 	udp := !*tcp
 	d, err := turnrelay.New(turnrelay.Config{
-		CallLinks: ls, Server: ap, Connections: *n, Mode: turnrelay.Mode(*mode),
-		Password: *password, WrapKey: key, TURNUDP: &udp, TURNOverride: *turnOverride,
+		Provider: *prov, CallLinks: ls, TURNServer: *turnServer, TURNUsername: *turnUser, TURNPassword: *turnPass,
+		Server: ap, Connections: *n, Mode: turnrelay.Mode(*mode),
+		Password: *password, WrapKey: key, TURNUDP: &udp,
 		Logf: log.Printf,
 	})
 	if err != nil {
@@ -3882,7 +3977,7 @@ func main() {
 - [ ] **Step 2: Build and smoke-test the flags**
 
 Run: `go build ./cmd/turnrelay-udp && ./turnrelay-udp -h 2>&1 | head -5 && ./turnrelay-udp -server 203.0.113.5:56004; echo exit=$?`
-Expected: usage prints; the second run fails fast with "at least one call link is required", exit 1.
+Expected: usage prints; the second run fails fast with "provider vk needs at least one call link", exit 1.
 
 - [ ] **Step 3: Commit**
 
@@ -3907,26 +4002,12 @@ Services on one bridge network `172.28.0.0/24`:
 - `coturn` (image `coturn/coturn:4.6`), `--user=user:pass --realm=turnrelay.test --lt-cred-mech --listening-ip=172.28.0.10 --relay-ip=172.28.0.10 --no-tls --no-dtls --min-port=49152 --max-port=49200`, static ip `.10`.
 - `vkserver` built from `Dockerfile.vkserver`: `git clone -b add-server-srtp-layer https://github.com/anton48/vk-turn-proxy` + `go build ./server`, runs `./server -listen 0.0.0.0:56004 -connect 172.28.0.30:51820 -srtp`, static ip `.20`.
 - `wgserver` (image `lscr.io/linuxserver/wireguard`), config `wg/server.conf` (Address 10.99.0.1/24, ListenPort 51820, peer = client key, AllowedIPs 10.99.0.2/32), `sysctls net.ipv4.ip_forward=1`, iptables MASQUERADE, static ip `.30`.
-- `web` (image `hashicorp/http-echo`, `-text=ok-through-vkturn`), static ip `.40`.
-- `client` built from `Dockerfile.client`: multi-stage build of `turnrelay-udp` from the repo root, plus `wireguard-tools` and `curl`; `cap_add: NET_ADMIN`; entrypoint runs `turnrelay-udp -listen 127.0.0.1:9000 -link https://vk.ru/call/join/UNUSEDLINK00 -server 172.28.0.20:56004 -n 4 -turn 172.28.0.10:3478 -static-cred user:pass &`, waits for "worker 0 up", `wg-quick up ./wg/client.conf` (Endpoint 127.0.0.1:9000, MTU 1280, AllowedIPs 172.28.0.40/32), then `curl -s --max-time 10 http://172.28.0.40:5678` and exits 0 only if the body equals `ok-through-vkturn`.
+- `web` (image `hashicorp/http-echo`, `-text=ok-through-relay`), static ip `.40`.
+- `client` built from `Dockerfile.client`: multi-stage build of `turnrelay-udp` from the repo root, plus `wireguard-tools` and `curl`; `cap_add: NET_ADMIN`; entrypoint runs `turnrelay-udp -listen 127.0.0.1:9000 -provider static -turn 172.28.0.10:3478 -turn-user user -turn-pass pass -server 172.28.0.20:56004 -n 4 &`, waits for "worker 0 up", `wg-quick up ./wg/client.conf` (Endpoint 127.0.0.1:9000, MTU 1280, AllowedIPs 172.28.0.40/32), then `curl -s --max-time 10 http://172.28.0.40:5678` and exits 0 only if the body equals `ok-through-relay`.
 
-- [ ] **Step 2: Add `-static-cred user:pass` to turnrelay-udp**
+- [ ] **Step 2: Confirm the static provider path**
 
-The relay is coturn with long-term credentials, so no VK fetch must happen. Add the flag to `cmd/turnrelay-udp/main.go`:
-```go
-staticCred := flag.String("static-cred", "", "user:pass for a self-hosted TURN relay (skips VK, needs -turn)")
-...
-if *staticCred != "" {
-	u, p, ok := strings.Cut(*staticCred, ":")
-	if !ok || *turnOverride == "" {
-		log.Fatal("-static-cred needs user:pass and -turn")
-	}
-	cfg.Fetcher = func(context.Context, string) (provider.Credential, error) {
-		return provider.Credential{Username: u, Password: p, Relays: []string{*turnOverride}, Link: "static"}, nil
-	}
-}
-```
-(build `cfg := turnrelay.Config{...}` first, then `turnrelay.New(cfg)`; import `creds`.)
+No code change: `-provider static` (Task 12) skips VK entirely, so the compose client never reaches the internet.
 
 - [ ] **Step 3: Write run.sh**
 
@@ -3947,14 +4028,14 @@ Add to `Makefile`: `integration:\n\tbash test/integration/run.sh`.
 - [ ] **Step 4: Run it**
 
 Run: `make integration`
-Expected: client container prints `ok-through-vkturn` and exits 0; `vkserver` log shows one group with 4 connections (lines like `group <hex>: ... conns=4`).
+Expected: client container prints `ok-through-relay` and exits 0; `vkserver` log shows one group with 4 connections (lines like `group <hex>: ... conns=4`).
 
 Known interop risks to check in the server log if it fails: (1) the server demuxes DTLS vs RTP by first byte, so our RTP packets must never start with a byte in 20..63 (they start with 0x80, fine); (2) the server expects `SRTP_AES128_CM_HMAC_SHA1_80` and rejects other profiles; (3) hello must be exactly 20 bytes.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add test/integration Makefile cmd && git commit -m "test: docker interop with the anton48 srtp server, coturn and wireguard"
+git add test/integration Makefile && git commit -m "test: docker interop with the anton48 srtp server, coturn and wireguard"
 ```
 
 ---
@@ -3976,9 +4057,9 @@ git add test/integration Makefile cmd && git commit -m "test: docker interop wit
 set -euo pipefail
 PUB=${1:?public ip}; WGPORT=${2:-51820}; PXPORT=${3:-56004}
 apt-get update && apt-get install -y wireguard git golang-go iptables curl
-mkdir -p /opt/vkturn && cd /opt/vkturn
+mkdir -p /opt/turnrelay && cd /opt/turnrelay
 [ -d vk-turn-proxy ] || git clone -b add-server-srtp-layer https://github.com/anton48/vk-turn-proxy
-(cd vk-turn-proxy && go build -o /opt/vkturn/server ./server)
+(cd vk-turn-proxy && go build -o /opt/turnrelay/server ./server)
 umask 077
 [ -f server.key ] || { wg genkey > server.key; wg pubkey < server.key > server.pub; }
 [ -f client.key ] || { wg genkey > client.key; wg pubkey < client.key > client.pub; }
@@ -3996,18 +4077,18 @@ AllowedIPs = 10.8.0.2/32
 EOC
 sysctl -w net.ipv4.ip_forward=1
 systemctl enable --now wg-quick@wg0
-cat > /etc/systemd/system/vkturn-server.service <<EOC
+cat > /etc/systemd/system/turnrelay-server.service <<EOC
 [Unit]
 Description=vk-turn-proxy SRTP server
 After=network.target wg-quick@wg0.service
 [Service]
-ExecStart=/opt/vkturn/server -listen 0.0.0.0:$PXPORT -connect 127.0.0.1:$WGPORT -srtp
+ExecStart=/opt/turnrelay/server -listen 0.0.0.0:$PXPORT -connect 127.0.0.1:$WGPORT -srtp
 Restart=always
 RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOC
-systemctl daemon-reload && systemctl enable --now vkturn-server
+systemctl daemon-reload && systemctl enable --now turnrelay-server
 echo "server public key: $(cat server.pub)"
 echo "client private key: $(cat client.key)"
 echo "proxy endpoint: $PUB:$PXPORT   wg tunnel address: 10.8.0.2/32"
@@ -4066,17 +4147,17 @@ git add docs/protocol.md && git commit -m "docs: VK-TURN wire protocol note"
 
 - [ ] **Step 1: Write the draft with this structure (English, no em-dashes)**
 
-Title: `New outbound: VK-TURN (WebRTC/TURN relay transport for censorship circumvention)`
+Title: `New outbound: turnrelay (tunnel through WebRTC TURN relays, e.g. VK Calls, for censorship circumvention)`
 
 Sections:
 1. Summary: two sentences.
 2. Motivation: Russian whitelists; VK Calls TURN relays are whitelisted; existing tools are standalone VPN apps without domain routing and collide with the one-VPN limit on iOS; the iOS client maintainer's statement (link anton48/vk-turn-proxy-ios#25).
-3. Proposed design: `vkturn` is a UDP-only outbound; L4 comes from the existing `wireguard` endpoint through `detour`; config example from the spec; how scenario (a) and (b) compose; nothing changes in the WireGuard endpoint.
+3. Proposed design: `turnrelay` is a UDP-only outbound with pluggable credential providers (`vk` today, `static` for any relay); L4 comes from the existing `wireguard` endpoint through `detour`; config example from the spec; how scenario (a) and (b) compose; nothing changes in the WireGuard endpoint.
 4. Config schema: the option table from spec section 6.
 5. Transport details: link to `docs/protocol.md`; modes; measurements (raw DTLS shaped to ~9 KB/s per allocation; SRTP ~200 KB/s per allocation, 30 allocations ~50 Mbit/s; UDP vs TCP relay transport ~66 vs ~21 Mbit/s).
 6. Security notes: static wrap key has no forward secrecy; the inner WireGuard session does; VK sees participant count and bytes; ban footprint grows with connections, default 30 and hard max 60.
 7. Licensing and provenance: library is GPL-3.0 (compatible with sing-box), derived from GPL projects, no PolyForm code; dependency list (pion/turn, pion/dtls, pion/srtp, tls-client).
-8. Ask: (a) in-tree behind a `with_vkturn` build tag, or (b) keep it as an external module `github.com/romanrublev/turnrelay` that clients register; which do you prefer, and any objections to the outbound shape (UDP-only outbound used as detour)?
+8. Ask: (a) in-tree behind a `with_turnrelay` build tag, or (b) keep it as an external module `github.com/romanrublev/turnrelay` that clients register; which do you prefer, and any objections to the outbound shape (UDP-only outbound used as detour)?
 9. Status: library and CLI exist with an in-process test suite and a docker interop test; link to the repo.
 
 - [ ] **Step 2: Commit**
@@ -4089,6 +4170,6 @@ git add docs/rfc-sing-box-issue.md && git commit -m "docs: sing-box RFC issue dr
 
 ## Self-review notes
 
-- Spec coverage: section 4 (architecture) -> Tasks 10, 11; 5.1 API -> Task 11; 5.2 engine -> Task 10; 5.3 obfs -> Tasks 3-6; 5.4 creds -> Task 8; credpool -> Task 9; relay -> Task 7; CLI -> Task 12; testing section 9 -> unit tests in every task, docker interop Task 13, e2e Task 14; deliverables protocol note and RFC -> Tasks 15, 16. sing-box integration (spec section 6) is milestone 2 and intentionally absent.
+- Spec coverage: section 4 (architecture) -> Tasks 10, 11; 5.1 API -> Task 11; 5.2 engine -> Task 10; 5.3 obfs -> Tasks 3-6; 5.4 providers -> Task 8; credpool -> Task 9; relay -> Task 7; CLI -> Task 12; testing section 9 -> unit tests in every task, docker interop Task 13, e2e Task 14; deliverables protocol note and RFC -> Tasks 15, 16. sing-box integration (spec section 6) is milestone 2 and intentionally absent.
 - Captcha policy `wait` (spec 5.2): Task 11 accepts the value but Task 9's pool already returns the captcha error immediately during cooldown; `wait` differs only in that the mux worker's backoff naturally retries after the cooldown, which is what both policies do today. Document in Task 11 that `wait` and `fail` currently behave the same at the library level (the difference is surfaced to sing-box logging in M2).
 - Type consistency: `credpool.Lease` fields (`Cred`, `Slot`, `Index`) used in Task 10; `relay.Options` fields used in Task 10; `obfs.Options{Password, WrapKey, Video, HandshakeTimeout}` used in Tasks 4-6 and 11; `mux.Options` fields identical in Task 10 and 11; `turntest.Server` methods `Addr/Username/Password/Allocations/SetQuota/Restart` used in Tasks 7, 10, 11.
