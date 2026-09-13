@@ -70,15 +70,3 @@ type peerPacketConn struct {
 func (p *peerPacketConn) WriteTo(b []byte, _ net.Addr) (int, error) {
 	return p.PacketConn.WriteTo(b, p.peer)
 }
-
-// Temporary stub until Task 6 (wrapWrapper) lands.
-
-type wrapWrapper struct {
-	key     []byte
-	video   bool
-	timeout time.Duration
-}
-
-func (w *wrapWrapper) Client(context.Context, net.PacketConn, net.Addr) (net.Conn, error) {
-	return nil, errors.New("not implemented")
-}

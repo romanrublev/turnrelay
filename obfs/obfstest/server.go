@@ -14,6 +14,7 @@ import (
 	"github.com/pion/dtls/v3"
 	"github.com/pion/dtls/v3/pkg/crypto/selfsign"
 	"github.com/pion/transport/v4/deadline"
+	pionudp "github.com/pion/transport/v4/udp"
 
 	"github.com/romanrublev/turnrelay/obfs"
 )
@@ -71,7 +72,75 @@ func ListenDTLS(t *testing.T) *Server {
 					_ = dc.Close()
 					return
 				}
-				s.conns <- dc
+				select {
+				case s.conns <- dc:
+				case <-ctx.Done():
+					_ = dc.Close()
+				}
+			}()
+		}
+	}()
+	t.Cleanup(s.Close)
+	return s
+}
+
+// udpConnPacketConn adapts a connection-oriented net.Conn (one per source
+// address, as returned by pion/transport's udp.Listen) into a net.PacketConn:
+// obfs.NewWrapPacketConn and dtls.ServerWithOptions both want ReadFrom/WriteTo,
+// not Read/Write, and the peer address never changes for a given conn.
+type udpConnPacketConn struct {
+	net.Conn
+}
+
+func (c *udpConnPacketConn) ReadFrom(b []byte) (int, net.Addr, error) {
+	n, err := c.Conn.Read(b)
+	return n, c.Conn.RemoteAddr(), err
+}
+
+func (c *udpConnPacketConn) WriteTo(b []byte, _ net.Addr) (int, error) {
+	return c.Conn.Write(b)
+}
+
+// ListenWrap mirrors the WDTT server: UDP socket, WRAP-v1 envelope, then DTLS.
+func ListenWrap(t *testing.T, key []byte) *Server {
+	t.Helper()
+	cert, err := selfsign.GenerateSelfSigned()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pl, err := pionudp.Listen("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{addr: pl.Addr().(*net.UDPAddr), conns: make(chan net.Conn, 64)}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.close = func() { cancel(); _ = pl.Close() }
+	go func() {
+		for {
+			c, err := pl.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				raddr := c.RemoteAddr()
+				codec, err := obfs.NewWrapCodec(key, false)
+				if err != nil {
+					return
+				}
+				pc := obfs.NewWrapPacketConn(&udpConnPacketConn{c}, codec)
+				dc, err := dtls.ServerWithOptions(pc, raddr, serverOptions(cert)...)
+				if err != nil {
+					return
+				}
+				if err := dc.HandshakeContext(ctx); err != nil {
+					_ = dc.Close()
+					return
+				}
+				select {
+				case s.conns <- dc:
+				case <-ctx.Done():
+					_ = dc.Close()
+				}
 			}()
 		}
 	}()
