@@ -51,7 +51,7 @@ Two deployment scenarios must work with the same building blocks:
 1. cacggghp/vk-turn-proxy (the GPL Go core named as the base) is DTLS-only and last touched April 2026. VK relays now shape raw DTLS to ~9 KB/s per allocation (measured by anton48, `pkg/proxy/proxy.go`). The `dtls` mode is kept only as a deprecated legacy option.
 2. Two obfuscation modes are alive on VK relays and have GPL-compatible Go implementations:
    - `srtp`: real DTLS-SRTP (RFC 5764, pion/srtp, RTP payload type 100), from anton48/vk-turn-proxy-ios `pkg/proxy/srtpwrap` (MIT) and its server counterpart anton48/vk-turn-proxy branch `add-server-srtp-layer` (GPL-3.0). ~200 KB/s per allocation, linear scaling, 30 allocations give ~50 Mbit/s.
-   - `wrap`: WDTT-WRAP-v1 from amurcanov/proxy-turn-vk-android (GPL-3.0): RTP header (PT 111, Opus) plus ChaCha20-Poly1305 with an HKDF key from a shared password, wrapped around plain DTLS. Used by the WDTT, FreeTurn and Moroka8 server families.
+   - `wrap`: WDTT-WRAP-v1 from amurcanov/proxy-turn-vk-android (GPL-3.0): RTP header (PT 111, Opus) plus ChaCha20-Poly1305 with an HKDF key from a shared password, wrapped around plain DTLS. Used by the WDTT server family. FreeTurn (samosvalishe, profiles rtpopus/2/3) and anton48's `-wrap-srtp` (explicit 12-byte nonce, raw hex key) are different envelopes and are deferred to M3.
 3. CSQTT (amurcanov/csqtt) is not "another wrapper": it is a different L3 (CQF1 framing, striping, FEC, server-side TUN) that replaces WireGuard. Its only server is Rust under PolyForm Noncommercial. A Go client exists under MIT (`pkg/csqtt` in the iOS repo). It is deferred to a later milestone with its own design (netstack inside the outbound).
 4. sing-box's `wireguard` endpoint accepts `detour`. With a detour, `transport/wireguard/client_bind.go` calls `dialer.DialContext("udp", peerAddr)` on the detour outbound and uses the returned conn as the WireGuard bind. Therefore any outbound that implements `N.Dialer` for UDP can carry WireGuard, and sing-box's own gVisor netstack turns it into TCP/UDP streams. No change to the WireGuard endpoint is required.
 5. VK quota: 10 allocations per TURN credential, excess answered with TURN error 486. One credential equals one anonymous "participant" in the call. 30 connections therefore mean 3 participants, not 30.
@@ -174,7 +174,7 @@ The RFC issue proposes two acceptable outcomes: in-tree behind the build tag, or
 
 ## 7. Server
 
-Milestone 1 uses anton48/vk-turn-proxy `srtp-build306` unchanged (`-srtp`, or `-wrap-srtp -wrap-key` for the wrap mode) with wg-quick behind it. WDTT/FreeTurn compatibility uses `wrap` mode; WireGuard keys for WDTT are obtained once via a `getconf` helper (WDTT issues them per device id and password). A proxy-exit server that dials arbitrary destinations is a later milestone, not part of this design.
+Milestone 1 uses anton48/vk-turn-proxy `srtp-build306` unchanged (`-srtp`) with wg-quick behind it. The `wrap` mode targets the WDTT server (amurcanov/proxy-turn-vk-android linux-server); WireGuard keys for WDTT are obtained once via a `getconf` helper (WDTT issues them per device id and password). A proxy-exit server that dials arbitrary destinations is a later milestone, not part of this design.
 
 ## 8. Error handling summary
 
@@ -199,7 +199,7 @@ Milestone 1 uses anton48/vk-turn-proxy `srtp-build306` unchanged (`-srtp`, or `-
 
 - M1: `docs/protocol.md`, RFC issue in SagerNet/sing-box, `vkturn-dialer` library and `vkturn-udp` CLI passing the integration and e2e tests above.
 - M2: sing-box fork with the `vkturn` outbound; the config in section 2 works end to end on macOS and Linux.
-- M3: `wrap` interop with WDTT and FreeTurn, credential disk cache, captcha callback hook; Xray dialer if maintainers are receptive.
+- M3: `wrap` e2e against WDTT, FreeTurn and anton48 `-wrap-srtp` envelopes, credential disk cache, captcha callback hook; Xray dialer if maintainers are receptive.
 - M4: CSQTT mode (netstack inside the outbound) and/or a proxy-exit server.
 
 ## 11. Non-goals
