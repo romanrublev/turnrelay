@@ -19,6 +19,7 @@ import (
 	"github.com/pion/dtls/v3"
 	"github.com/pion/rtp"
 	"github.com/pion/srtp/v3"
+	"github.com/pion/transport/v4/deadline"
 )
 
 const (
@@ -128,25 +129,31 @@ func (d *demux) Close() {
 
 // dtlsSide is the PacketConn handed to pion/dtls: reads come from dtlsCh,
 // writes go straight to the peer.
-func (d *demux) dtlsSide() net.PacketConn { return &demuxSide{d: d} }
+func (d *demux) dtlsSide() net.PacketConn { return &demuxSide{d: d, dl: deadline.New()} }
 
+// demuxSide's deadline uses github.com/pion/transport/v4/deadline instead of
+// a home-grown timer+channel: a naive "snapshot the channel, then select on
+// it" implementation is racy against a concurrent SetReadDeadline, because
+// SetReadDeadline would allocate a *new* channel and close that one, leaving
+// a read already parked in ReadFrom watching the old (often nil, i.e.
+// never-firing) channel. pion/dtls relies on exactly this to cancel a
+// blocked handshake read (it calls SetReadDeadline with a past time on the
+// pending read and waits for the reader to return), so that race meant a
+// handshake against a silent peer never timed out. deadline.Deadline avoids
+// it: Set closes the very channel a caller already obtained from Done,
+// reallocating only after a previous deadline already fired.
 type demuxSide struct {
-	d        *demux
-	dlMu     sync.Mutex
-	deadline chan struct{}
-	dlTimer  *time.Timer
+	d  *demux
+	dl *deadline.Deadline
 }
 
 func (s *demuxSide) ReadFrom(b []byte) (int, net.Addr, error) {
-	s.dlMu.Lock()
-	dl := s.deadline
-	s.dlMu.Unlock()
 	select {
 	case pkt := <-s.d.dtlsCh:
 		return copy(b, pkt), s.d.peer, nil
 	case <-s.d.done:
 		return 0, nil, net.ErrClosed
-	case <-dl:
+	case <-s.dl.Done():
 		return 0, nil, os.ErrDeadlineExceeded
 	}
 }
@@ -158,24 +165,7 @@ func (s *demuxSide) SetDeadline(t time.Time) error             { return s.SetRea
 func (s *demuxSide) SetWriteDeadline(time.Time) error          { return nil }
 
 func (s *demuxSide) SetReadDeadline(t time.Time) error {
-	s.dlMu.Lock()
-	defer s.dlMu.Unlock()
-	if s.dlTimer != nil {
-		s.dlTimer.Stop()
-		s.dlTimer = nil
-	}
-	if t.IsZero() {
-		s.deadline = nil
-		return nil
-	}
-	ch := make(chan struct{})
-	s.deadline = ch
-	d := time.Until(t)
-	if d <= 0 {
-		close(ch)
-		return nil
-	}
-	s.dlTimer = time.AfterFunc(d, func() { close(ch) })
+	s.dl.Set(t)
 	return nil
 }
 
@@ -190,7 +180,7 @@ type srtpConn struct {
 	wmu    sync.Mutex
 	seq    uint16
 	ts     uint32
-	rdl    demuxSide // reused only for its deadline machinery
+	dl     *deadline.Deadline // see demuxSide's doc comment for why this type
 	closed chan struct{}
 	once   sync.Once
 }
@@ -214,14 +204,11 @@ func newSRTPConn(d *demux, dc *dtls.Conn, isClient bool) (*srtpConn, error) {
 	}
 	var ssrc [4]byte
 	_, _ = rand.Read(ssrc[:])
-	return &srtpConn{d: d, dc: dc, enc: enc, dec: dec, ssrc: binary.BigEndian.Uint32(ssrc[:]), rdl: demuxSide{d: d}, closed: make(chan struct{})}, nil
+	return &srtpConn{d: d, dc: dc, enc: enc, dec: dec, ssrc: binary.BigEndian.Uint32(ssrc[:]), dl: deadline.New(), closed: make(chan struct{})}, nil
 }
 
 func (c *srtpConn) Read(b []byte) (int, error) {
 	for {
-		c.rdl.dlMu.Lock()
-		dl := c.rdl.deadline
-		c.rdl.dlMu.Unlock()
 		select {
 		case pkt := <-c.d.rtpCh:
 			plain, err := c.dec.DecryptRTP(nil, pkt, nil)
@@ -238,7 +225,7 @@ func (c *srtpConn) Read(b []byte) (int, error) {
 			return 0, net.ErrClosed
 		case <-c.d.done:
 			return 0, net.ErrClosed
-		case <-dl:
+		case <-c.dl.Done():
 			return 0, os.ErrDeadlineExceeded
 		}
 	}
@@ -273,11 +260,17 @@ func (c *srtpConn) Close() error {
 	return nil
 }
 
-func (c *srtpConn) LocalAddr() net.Addr               { return c.d.raw.LocalAddr() }
-func (c *srtpConn) RemoteAddr() net.Addr              { return c.d.peer }
-func (c *srtpConn) SetDeadline(t time.Time) error     { return c.rdl.SetReadDeadline(t) }
-func (c *srtpConn) SetReadDeadline(t time.Time) error { return c.rdl.SetReadDeadline(t) }
-func (c *srtpConn) SetWriteDeadline(time.Time) error  { return nil }
+func (c *srtpConn) LocalAddr() net.Addr  { return c.d.raw.LocalAddr() }
+func (c *srtpConn) RemoteAddr() net.Addr { return c.d.peer }
+func (c *srtpConn) SetDeadline(t time.Time) error {
+	c.dl.Set(t)
+	return nil
+}
+func (c *srtpConn) SetReadDeadline(t time.Time) error {
+	c.dl.Set(t)
+	return nil
+}
+func (c *srtpConn) SetWriteDeadline(time.Time) error { return nil }
 
 // NewSRTPServerConn is test support, not API-stable. It builds the
 // server-side twin of srtpConn for obfstest.ListenSRTP: raw is the shared

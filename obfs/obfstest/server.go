@@ -6,12 +6,14 @@ import (
 	"context"
 	"crypto/tls"
 	"net"
+	"os"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/pion/dtls/v3"
 	"github.com/pion/dtls/v3/pkg/crypto/selfsign"
+	"github.com/pion/transport/v4/deadline"
 
 	"github.com/romanrublev/turnrelay/obfs"
 )
@@ -158,7 +160,7 @@ func serveSRTP(ctx context.Context, raw net.PacketConn, opts []dtls.ServerOption
 }
 
 func acceptSRTPSession(ctx context.Context, raw net.PacketConn, src net.Addr, opts []dtls.ServerOption, sess *srtpSession, out chan<- net.Conn) {
-	side := &sessionConn{ctx: ctx, raw: raw, src: src, dtlsCh: sess.dtlsCh}
+	side := &sessionConn{ctx: ctx, raw: raw, src: src, dtlsCh: sess.dtlsCh, dl: deadline.New()}
 	dc, err := dtls.ServerWithOptions(side, src, opts...)
 	if err != nil {
 		return
@@ -182,28 +184,27 @@ func acceptSRTPSession(ctx context.Context, raw net.PacketConn, src net.Addr, op
 // it feeds pion/dtls this session's demuxed dtlsCh and writes straight back
 // to the shared socket at src. It is deliberately not shared with obfs since
 // obfs.NewSRTPServerConn already covers the post-handshake data path.
+//
+// The deadline uses github.com/pion/transport/v4/deadline rather than a
+// snapshot-a-channel-then-select timer: see obfs.demuxSide's doc comment for
+// why a naive version is racy against a concurrent SetReadDeadline and would
+// leave pion/dtls unable to cancel a blocked handshake read.
 type sessionConn struct {
 	ctx    context.Context
 	raw    net.PacketConn
 	src    net.Addr
 	dtlsCh chan []byte
-
-	dlMu     sync.Mutex
-	deadline chan struct{}
-	dlTimer  *time.Timer
+	dl     *deadline.Deadline
 }
 
 func (s *sessionConn) ReadFrom(b []byte) (int, net.Addr, error) {
-	s.dlMu.Lock()
-	dl := s.deadline
-	s.dlMu.Unlock()
 	select {
 	case pkt := <-s.dtlsCh:
 		return copy(b, pkt), s.src, nil
 	case <-s.ctx.Done():
 		return 0, nil, net.ErrClosed
-	case <-dl:
-		return 0, nil, timeoutError{}
+	case <-s.dl.Done():
+		return 0, nil, os.ErrDeadlineExceeded
 	}
 }
 
@@ -214,29 +215,6 @@ func (s *sessionConn) SetDeadline(t time.Time) error             { return s.SetR
 func (s *sessionConn) SetWriteDeadline(time.Time) error          { return nil }
 
 func (s *sessionConn) SetReadDeadline(t time.Time) error {
-	s.dlMu.Lock()
-	defer s.dlMu.Unlock()
-	if s.dlTimer != nil {
-		s.dlTimer.Stop()
-		s.dlTimer = nil
-	}
-	if t.IsZero() {
-		s.deadline = nil
-		return nil
-	}
-	ch := make(chan struct{})
-	s.deadline = ch
-	d := time.Until(t)
-	if d <= 0 {
-		close(ch)
-		return nil
-	}
-	s.dlTimer = time.AfterFunc(d, func() { close(ch) })
+	s.dl.Set(t)
 	return nil
 }
-
-type timeoutError struct{}
-
-func (timeoutError) Error() string   { return "obfstest: i/o timeout" }
-func (timeoutError) Timeout() bool   { return true }
-func (timeoutError) Temporary() bool { return true }
