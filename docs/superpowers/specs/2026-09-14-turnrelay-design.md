@@ -1,4 +1,4 @@
-# vkturn-dialer: VK-TURN transport for sing-box (design)
+# turnrelay: VK-TURN transport for sing-box (design)
 
 Date: 2026-09-14
 Status: approved for implementation (milestone 1)
@@ -18,14 +18,14 @@ A sing-box user writes a config where selected traffic (chosen by rule-sets) egr
 ```json
 {
   "outbounds": [
-    { "type": "vkturn", "tag": "vk",
-      "call_link": "https://vk.ru/call/join/<hash>",
+    { "type": "turnrelay", "tag": "relay",
+      "provider": "vk", "call_link": "https://vk.ru/call/join/<hash>",
       "server": "203.0.113.5", "server_port": 56004,
       "connections": 30, "mode": "srtp", "udp": true },
     { "type": "direct", "tag": "direct" }
   ],
   "endpoints": [
-    { "type": "wireguard", "tag": "wg", "detour": "vk",
+    { "type": "wireguard", "tag": "wg", "detour": "relay",
       "address": ["10.8.0.2/32"], "private_key": "<client wg key>",
       "peers": [{ "address": "203.0.113.5", "port": 56004,
                   "public_key": "<server wg key>",
@@ -57,6 +57,10 @@ Two deployment scenarios must work with the same building blocks:
 5. VK quota: 10 allocations per TURN credential, excess answered with TURN error 486. One credential equals one anonymous "participant" in the call. 30 connections therefore mean 3 participants, not 30.
 6. anton48's SRTP server (release `srtp-build306`) already groups a client's N connections by a session UUID sent in an in-band hello, uses one socket towards WireGuard and schedules the downlink across connections with work stealing. This is the M1 server target; no new server is needed.
 
+### Naming
+
+The transport is not VK-specific: it is a tunnel through any TURN relay whose traffic looks like WebRTC media. VK Calls is one *credential provider*; OK Calls, Yandex Telemost (historically) and self-hosted coturn are others. Names therefore follow the mechanism, not the carrier: outbound type `turnrelay`, module `github.com/romanrublev/turnrelay`, providers under `provider/` (`vk`, `static`; later `ok`, `telemost`). Only prose that describes the VK ecosystem says "VK".
+
 ## 4. Architecture (scheme A)
 
 ```
@@ -66,8 +70,8 @@ sing-box (Happ)                                     VPS
 |   ru -> direct               |                    |   group by session UUID      |
 |   final -> "wg"              |   VK TURN relay    |   one socket -> wg :51820    |
 | endpoint wireguard "wg"      |   (whitelisted)    | WireGuard (wg-quick) -> NAT  |
-|   detour: "vk" --------------+--> N allocations --+->                            |
-| outbound vkturn "vk"         |   ChannelData/UDP  |                              |
+|   detour: "relay" -----------+--> N allocations --+->                            |
+| outbound turnrelay "relay"   |   ChannelData/UDP  |                              |
 |   creds <- call_link         |                    |                              |
 +------------------------------+                    +------------------------------+
 ```
@@ -84,23 +88,25 @@ The outbound owns N such allocations and presents them as one datagram pipe. Upl
 
 WireGuard's role is exactly what the ecosystem already uses it for: an internal transport that multiplexes N allocations into one L3 pipe. Routing is not done by AllowedIPs; sing-box rule-sets decide which connections enter the `wg` endpoint at all.
 
-## 5. Module `github.com/romanrublev/vkturn-dialer`
+## 5. Module `github.com/romanrublev/turnrelay`
 
 License GPL-3.0. Provenance is recorded in `NOTICE`: cacggghp/vk-turn-proxy (credential chain), anton48/vk-turn-proxy-ios (credential pool, hello/probe control plane, srtpwrap which is MIT), amurcanov/proxy-turn-vk-android (WRAP-v1). Code is extracted into package form, not copied file by file; the iOS `proxy.go` (5.5k lines with iOS-specific socket stats, speed test and path-restart logic) is not suitable for import into sing-box.
 
 ```
-vkturn/            public API: Config, Dialer (Start, Close, DialContext, ListenPacket, Stats)
-  creds/           VK credential chain (login.vk.ru -> api.vk.ru -> calls.okcdn.ru), utls Chrome
-                   profile, captcha detection returning CaptchaRequiredError
-  credpool/        slots of 10 connections per credential, 3-6 s cooldown between fetches,
-                   486 -> MarkSaturated, TTL 10 min minus safety margin, optional disk cache
-  relay/           pion/turn allocation (UDP default, TCP fallback), STUN Binding keepalive
-                   every 10 s, permission refresh, 486/401 classification
-  obfs/            Wrapper interface { Client(ctx, net.PacketConn, peer) (net.Conn, error) }
+(root) turnrelay   public API: Config, Dialer (Start, Close, DialContext, ListenPacket, Stats)
+provider/          Credential, CaptchaRequiredError: what every credential source returns
+provider/vk/       VK Calls anonymous-join chain (login.vk.ru -> api.vk.ru -> calls.okcdn.ru),
+                   utls Chrome profile, captcha detection
+provider/static/   fixed username/password for a self-hosted or third-party relay
+credpool/          slots of 10 connections per credential, 3-6 s cooldown between fetches,
+                   486 -> saturated, TTL 10 min minus safety margin
+relay/             pion/turn allocation (UDP default, TCP fallback), STUN Binding keepalive
+                   every 10 s, 486/401 classification
+obfs/              Wrapper interface { Client(ctx, net.PacketConn, peer) (net.Conn, error) }
                    implementations: srtp, wrap, dtls
-  mux/             N workers, shared uplink queue with work stealing, merged downlink,
+mux/               N workers, shared uplink queue with work stealing, merged downlink,
                    group hello and probe-echo control frames, zombie detection
-cmd/vkturn-udp/    CLI: listens on 127.0.0.1:9000 and forwards datagrams into the pool;
+cmd/turnrelay-udp/ CLI: listens on 127.0.0.1:9000 and forwards datagrams into the pool;
                    used for e2e with plain wg-quick and no sing-box
 docs/protocol.md   wire protocol note (milestone 1 deliverable)
 ```
@@ -109,13 +115,16 @@ docs/protocol.md   wire protocol note (milestone 1 deliverable)
 
 ```go
 type Config struct {
-    CallLinks    []string      // one or more https://vk.ru/call/join/<hash>
+    Provider     string        // "vk" (default) or "static"
+    CallLinks    []string      // vk: one or more https://vk.ru/call/join/<hash>
+    TURNServer   string        // static: relay host:port; vk: optional override of the relay VK returns
+    TURNUsername string        // static only
+    TURNPassword string        // static only
     Server       netip.AddrPort
     Connections  int           // default 30, max 60
     Mode         Mode          // ModeSRTP (default), ModeWrap, ModeDTLS
     Password     string        // ModeWrap only: HKDF input for the wrap key
     TURNUDP      bool          // default true; false selects TCP to the relay
-    TURNOverride string        // optional host:port replacing the relay from creds
     Captcha      CaptchaPolicy // Fail (default) or Wait
     Logger       Logger
 }
@@ -163,12 +172,12 @@ Credential lifetime is treated as 10 minutes minus a 60 s margin. A global mutex
 
 ## 6. sing-box integration (milestone 2)
 
-Fork SagerNet/sing-box, add `protocol/vkturn/outbound.go`, `option/vkturn.go`, `include/vkturn.go` behind build tag `with_vkturn` (same pattern as `with_wireguard`), and docs. The outbound:
+Fork SagerNet/sing-box, add `protocol/turnrelay/outbound.go`, `option/turnrelay.go`, `include/turnrelay.go` behind build tag `with_turnrelay` (same pattern as `with_wireguard`), and docs. The outbound:
 
-- `Type() = "vkturn"`, `Network() = [udp]`, embeds `outbound.Adapter`.
+- `Type() = "turnrelay"`, `Network() = [udp]`, embeds `outbound.Adapter`.
 - Starts the dialer in `Start(StartStateStart)`, closes in `Close`.
-- `DialContext`/`ListenPacket` delegate to the dialer; TCP returns `E.New("vkturn: only udp is supported")`.
-- Options: `call_link` / `call_links`, `server`, `server_port`, `connections`, `mode`, `password`, `udp`, `turn_server`, `captcha`, plus `DialerOptions` used for the outbound sockets towards VK API and the relay (so `bind_interface` and `detour` work for those too).
+- `DialContext`/`ListenPacket` delegate to the dialer; TCP returns `E.New("turnrelay: only udp is supported")`.
+- Options: `provider` (`vk` | `static`), `call_link` / `call_links` (vk), `turn_server`, `turn_username`, `turn_password` (static, or `turn_server` alone as an override for vk), `server`, `server_port`, `connections`, `mode`, `password`, `udp`, `captcha`, plus `DialerOptions` used for the outbound sockets towards VK API and the relay (so `bind_interface` and `detour` work for those too).
 
 The RFC issue proposes two acceptable outcomes: in-tree behind the build tag, or an external module that graphical clients register themselves. The code is structured so that the second works without any patch to sing-box.
 
@@ -192,13 +201,13 @@ Milestone 1 uses anton48/vk-turn-proxy `srtp-build306` unchanged (`-srtp`) with 
 ## 9. Testing
 
 - Unit: wrap/unwrap known-answer vectors (shared with the Android implementation), hello and probe parsers, credential pool state machine (quota, TTL, cooldown, 486, 401), work-stealing striper, obfs demux by first byte.
-- Integration without VK (runs in CI): docker compose with coturn (static long-term credential), anton48 `-srtp` server and wireguard-go; `vkturn-udp` with `-turn` override and an injected static credential; iperf3 through the WireGuard tunnel must pass and the server log must show one group with N connections.
+- Integration without VK (runs in CI): docker compose with coturn (static long-term credential), anton48 `-srtp` server and wireguard-go; `turnrelay-udp` with `-turn` override and an injected static credential; iperf3 through the WireGuard tunnel must pass and the server log must show one group with N connections.
 - End-to-end on the user's VPS with a real VK call link: `curl --interface` through sing-box with `final: wg` returns the VPS address, a RU domain resolves and connects direct, iperf3 over 30 connections sustains at least 30 Mbit/s downlink.
 
 ## 10. Milestones
 
-- M1: `docs/protocol.md`, RFC issue in SagerNet/sing-box, `vkturn-dialer` library and `vkturn-udp` CLI passing the integration and e2e tests above.
-- M2: sing-box fork with the `vkturn` outbound; the config in section 2 works end to end on macOS and Linux.
+- M1: `docs/protocol.md`, RFC issue in SagerNet/sing-box, `turnrelay` library and `turnrelay-udp` CLI passing the integration and e2e tests above.
+- M2: sing-box fork with the `turnrelay` outbound; the config in section 2 works end to end on macOS and Linux.
 - M3: `wrap` e2e against WDTT, FreeTurn and anton48 `-wrap-srtp` envelopes, credential disk cache, captcha callback hook; Xray dialer if maintainers are receptive.
 - M4: CSQTT mode (netstack inside the outbound) and/or a proxy-exit server.
 

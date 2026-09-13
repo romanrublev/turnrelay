@@ -1,4 +1,4 @@
-module github.com/romanrublev/vkturn-dialer
+module github.com/romanrublev/turnrelay
 
 go 1.27.0
 
