@@ -1,10 +1,9 @@
 # turnrelay wire protocol
 
-Status: milestone 1 deliverable. Describes what the `turnrelay` library
-(`github.com/romanrublev/turnrelay`) puts on the wire, hop by hop, so that a
+Describes what the `turnrelay` library
+(`github.com/romanrublev/turnrelay`) puts on the wire, hop by hop, so a
 server implementer or a reviewer can check it against a packet capture.
-Every value below is taken from the code on branch `m1` or from the design
-spec (`docs/superpowers/specs/2026-09-14-turnrelay-design.md`).
+Every value below is taken from the library code.
 
 `turnrelay` tunnels UDP datagrams (in practice WireGuard) through WebRTC TURN
 relays, disguised as call media. VK Calls is one credential provider
@@ -45,113 +44,90 @@ from any worker.
 
 ## 2. Credential chain (`provider/vk`)
 
-The VK provider reproduces what the VK web client does when an anonymous
-visitor joins a call by link. The chain and the app ids follow
-cacggghp/vk-turn-proxy. All requests are `POST` with
-`Content-Type: application/x-www-form-urlencoded`, sent from a
-`bogdanfinn/tls-client` HTTP client with the Chrome 146 TLS fingerprint, a
-cookie jar and a 20 s timeout. Headers on every request: `User-Agent`
-(Chrome 146 on Windows 10), `sec-ch-ua` matching that Chrome build,
-`sec-ch-ua-mobile: ?0`, `sec-ch-ua-platform: "Windows"`, `Accept: */*`,
-`Origin: https://vk.ru`, `Referer: https://vk.ru/`, `Sec-Fetch-Site:
-same-site`, `Sec-Fetch-Mode: cors`, `Sec-Fetch-Dest: empty`.
+The VK provider joins a call by link as an anonymous visitor and reads the
+TURN credentials VK hands out for the call. There are two paths: a
+captcha-free one used by default, and a legacy one kept as a fallback.
 
-DNS for these hosts bypasses the system resolver and asks `77.88.8.8`,
-`77.88.8.1`, `8.8.8.8`, `1.1.1.1` in that order (whitelisted networks often
-break system DNS first). When the embedding application supplies
-`Config.DialContext` (a sing-box outbound passes its own dialer so `detour`
-and `bind_interface` apply), every TCP connection to the VK API is opened
-through it with the unresolved `host:443` instead, and that dialer is
-responsible for name resolution.
+### 2.1 Captcha-free path (default)
 
-`<hash>` is the part of the call link after `join/`
-(`https://vk.ru/call/join/<hash>` or `vk.com`; a bare hash is accepted).
+This is the flow the VK Calls app itself uses. It goes through `api.vk.me`
+with VK Connect's public `client_id` (`8093730`, no secret) and is not
+captcha-gated. Requests are bodiless `POST`s (every parameter is in the URL),
+sent from a `bogdanfinn/tls-client` HTTP client with a **Safari iOS TLS
+fingerprint** and a matching iOS `User-Agent` (a Chrome fingerprint here is
+rejected). `<link>` is `https://vk.ru/call/join/<hash>`, URL-escaped.
 
-| # | URL | Form fields | Consumed from the JSON response |
+| # | method (`https://api.vk.me/method/...`) | key parameters | consumed |
 |---|---|---|---|
-| 1 | `https://login.vk.ru/?act=get_anonym_token` | `client_id=<app id>`, `token_type=messages`, `client_secret=<app secret>`, `version=1`, `app_id=<app id>` | `data.access_token` (token1) |
-| 2 | `https://api.vk.ru/method/calls.getCallPreview?v=5.275&client_id=<app id>` | `vk_join_link=https://vk.com/call/join/<hash>`, `fields=photo_200`, `access_token=<token1>` | nothing; best effort, mirrors the web client |
-| 3 | `https://api.vk.ru/method/calls.getAnonymousToken?v=5.275&client_id=<app id>` | `vk_join_link=https://vk.com/call/join/<hash>`, `name=<random display name>`, `access_token=<token1>` | `response.token` (token2); `error` object on failure, captcha appears here |
-| 4 | `https://calls.okcdn.ru/fb.do` | `session_data={"version":2,"device_id":"<random uuid>","client_version":1.1,"client_type":"SDK_JS"}`, `method=auth.anonymLogin`, `format=JSON`, `application_key=CGMMEJLGDIHBABABA` | `session_key` (token3) |
-| 5 | `https://calls.okcdn.ru/fb.do` | `joinLink=<hash>`, `isVideo=false`, `protocolVersion=5`, `capabilities=2F7F`, `anonymToken=<token2>`, `method=vchat.joinConversationByLink`, `format=JSON`, `application_key=CGMMEJLGDIHBABABA`, `session_key=<token3>` | `turn_server.username`, `turn_server.credential`, `turn_server.urls[]` |
+| 1 | `auth.getAnonymToken` | `v=5.276`, `client_id=8093730`, `link`, `device_id`, `anonymName` | `response.token` (anonymous token) |
+| 2 | `messages.getCallPreview` | `anonymous_token`, `device_id`, `link` | confirms the call; `user_id`, `secret` when present |
+| 3 | `messages.getAnonymCallToken` | `anonymous_token`, `device_id`, `link`, `name` (and `user_id`/`secret` if step 2 returned them) | `response.token` (call token) |
+| 4 | `calls.okcdn.ru/fb.do` | `session_data={"version":2,"device_id":"<uuid>","client_version":"1.0.1"}`, `method=auth.anonymLogin`, `application_key=CGMMEJLGDIHBABABA` | `session_key` |
+| 5 | `calls.okcdn.ru/fb.do` | `joinLink=<hash>`, `isVideo=false`, `protocolVersion=5`, `anonymToken=<call token>`, `method=vchat.joinConversationByLink`, `application_key=CGMMEJLGDIHBABABA`, `session_key` | `turn_server.username`, `turn_server.credential`, `turn_server.urls[]` |
 
-The client sleeps 120 ms after hop 1, 300 ms after hop 2, 120 ms after hops 3
-and 4. Every dynamic form value is URL-escaped. A non-2xx HTTP status on any
-hop is an error naming the host, path and status. When a hop's JSON lacks
-the field the chain needs, the error names the hop, the field and the
-top-level keys that were present; response values (tokens, `session_key`,
-`turn_server.username`, `turn_server.credential`) never appear in errors or
-logs, since errors end up in `Stats.LastError`.
+A network-level failure (VK resets pooled HTTP/2 connections often) drops idle
+connections and retries once on a fresh one. If a captcha gate ever appears
+here, or a step errors, the provider falls back to the legacy path.
 
-From `turn_server.urls[]` only `turn:` and `turns:` entries are kept, entries
-with `transport=tcp` are dropped, and the scheme and query are stripped so
-that each relay is a bare `host:port`. Worker `i` of a credential uses relay
-`urls[i mod len(urls)]`.
+### 2.2 Legacy path (fallback)
 
-App ids (from `provider/vk/client.go`; each has a matching client secret in
-the same table there): `6287487` (VK web), `7879029` (m.vk), `52461373` (VK
-Video web), `52649896` (m.vk Video), `51781872` (VK ID auth). The chain is
-tried with each id in that order until one succeeds; a captcha aborts the
-loop immediately.
+The older flow the VK web client uses. Requests are `POST`s with
+`application/x-www-form-urlencoded` bodies, from a Chrome TLS fingerprint,
+Origin/Referer `https://vk.ru`. It uses `login.vk.ru` for an anonymous access
+token, then `api.vk.ru/method/calls.getAnonymousToken` for the call token,
+then the same two `calls.okcdn.ru` steps. VK now captcha-gates
+`calls.getAnonymousToken` and rejects freshly created links there, so this
+path mostly serves as a backstop.
 
-Captcha. Hop 3 answers with an `error` object instead of `response`:
+Several VK app id/secret pairs are tried in order; a captcha aborts the loop.
+
+### Captcha (legacy path only)
+
+`calls.getAnonymousToken` may answer with `error_code` 14 (VK Smart Captcha):
 
 ```json
-{"error": {"error_code": 14, "error_msg": "...", "captcha_sid": "...",
-           "captcha_img": "...", "redirect_uri": "https://...?...&session_token=..."}}
+{"error": {"error_code": 14, "captcha_sid": "...",
+           "redirect_uri": "https://...?session_token=..."}}
 ```
 
-`error_code` 14 is VK Smart Captcha. The provider returns
-`provider.CaptchaRequiredError{Sid, Img, RedirectURI, SessionToken}` where
-`SessionToken` is the `session_token` query parameter of `redirect_uri`
-(`captcha_sid` may arrive as a string or a number). Any other `error_code` is
-a plain error.
+The provider solves a proof-of-work captcha automatically: it fetches the
+`id.vk.ru/not_robot_captcha` page behind `redirect_uri`, parses the
+obfuscated PoW parameters (`}("<input>", <difficulty>, ...)`), computes
+`sha256(input + nonce)` until it starts with `<difficulty>` hex zeros, wraps
+the result as `v2.` + base64 of `{"hash","nonce","duration_ms","telemetry":{},"tel_hash":""}`,
+and runs the `captchaNotRobot.{initSession,settings,componentDone,check,endSession}`
+calls (with `Origin: https://id.vk.ru` and Chrome's HTTP/2 header order,
+which VK fingerprints). On success the `success_token` is replayed on
+`calls.getAnonymousToken`. Slider and image challenges are not solved; those
+surface the captcha error unchanged.
 
-Captcha (measured live 2026-09-14): the error carries a `redirect_uri` on
-`id.vk.ru/not_robot_captcha` whose page embeds an obfuscated proof-of-work
-script. The provider solves it in place: parse the IIFE arguments
-`}("<input>", <difficulty>, "pow_timeout"))` (input, hex-zero prefix length,
-never the obfuscated identifiers), sha256(input + nonce) until the prefix
-matches, wrap the result as `v2.` + base64 of
-`{"hash","nonce","duration_ms","telemetry":{},"tel_hash":""}` (the page's
-own success-branch shape; the legacy three-field shape is answered when the
-page has no `tel_hash`), then call `captchaNotRobot.initSession` (with the
-page's `window.vk.lang`), `.settings`, `.componentDone` (random 32-hex
-browser_fp, a fixed 1920x1080 desktop device JSON), wait 2 to 3 s, `.check`
-(hash, the `window.vk` UUID as `debug_info`) and `.endSession`. These calls
-carry `Origin: https://id.vk.ru` and Chrome's HTTP/2 header order, which VK
-fingerprints. On `status: OK` the `success_token` is sent back on
-`calls.getAnonymousToken` together with `captcha_sid`, `captcha_ts`,
-`captcha_attempt`. When `check` refuses (status BOT, `show_captcha_type`
-slider or image) the captcha error is surfaced unchanged; slider and image
-challenges are not solved.
+### Relay list, lifetime and quota
 
-Lifetime and quota (`credpool`):
+From `turn_server.urls[]` only `turn:`/`turns:` entries are kept,
+`transport=tcp` entries are dropped, and the scheme and query are stripped so
+each relay is a bare `host:port`. Worker `i` of a credential uses relay
+`urls[i mod len(urls)]`.
 
-- A credential is treated as valid for 10 minutes minus a 60 s safety
-  margin from the moment it was fetched; after that the slot is re-fetched
-  before the next allocation. Allocations that already exist keep working
-  past the TTL (measured 2026-09-14: 15 minutes, no restarts), because the
-  relay accepts TURN Refresh with the original credential; expiry only
-  gates new allocations.
-- VK's quota is per credential (per anonymous TURN username): about 20
-  allocations, then the relay answers TURN error 486 (Allocation Quota
-  Reached). Measured clean on 2026-09-14: three credentials from ONE call
-  link gave 20 + 20 + 20 = 60 live allocations, each hitting 486 on its
-  21st. The call link itself is not limited. The pool keeps ConnsPerSlot
-  workers per credential slot; a 486 saturates that slot and the worker
-  moves to a fresh slot, which mints another credential (captcha-free via
-  api.vk.me). 401 or a stale nonce invalidates the slot and re-fetches.
-- Fetches are serialised by a mutex and spaced by a random 3 to 6 s cooldown
-  (VK rate-limits the chain). A captcha puts the pool into a 60 s cooldown
-  during which no fetch is attempted.
-- Slot `s` (workers `10s .. 10s+9`) fetches from call link `s mod len(links)`,
-  so several call links spread the participants across calls.
+- **Lifetime.** A captcha-free credential is good for hours; the pool treats a
+  credential as valid for its TTL (8 hours, minus a 30-minute margin) and
+  re-fetches before the next allocation after that. Existing allocations keep
+  working past the TTL because the relay accepts TURN Refresh with the
+  original credential; the TTL only gates new allocations.
+- **Quota.** VK's quota is per credential (per anonymous TURN username): about
+  20 allocations, after which the relay answers TURN error 486 (Allocation
+  Quota Reached). The call link itself is not limited - several credentials
+  from one link each get their own ~20, so one link carries the full
+  connection count. The pool keeps `ConnsPerSlot` workers (18) per credential
+  slot; a 486 saturates that slot and the worker moves to a fresh slot, which
+  mints another credential. A 401 or stale nonce invalidates the slot and
+  re-fetches.
+- **Pacing.** Fetches are serialised and spaced by a random cooldown. Slot `s`
+  (workers `18s .. 18s+17`) fetches from call link `s mod len(links)`, so
+  multiple links spread the participants across calls.
 
-One credential is one anonymous participant in the call, good for about 20
-allocations. So the participant count is roughly connections / 20 (2 for
-30 connections, 3 for the 60-connection maximum), and one call link is
-enough for all of them.
+One credential is one anonymous participant in the call, good for ~18
+connections, so the participant count is roughly `connections / 18`. One call
+link is enough for the 60-connection maximum.
 
 ## 3. Relay (`relay`)
 
@@ -177,7 +153,7 @@ One allocation per worker, made with pion/turn v5:
   every 120 s and the channel binding every 5 minutes.
 - Keepalive: the worker sends a STUN `Binding` request to the relay every
   10 s for the lifetime of the allocation; VK relays drop silent allocations
-  well before the 10 minute lifetime.
+  before their nominal lifetime.
 - Error classification on Allocate: a typed TURN error 486 is a quota error;
   401, 438 (stale nonce) and a typed 400 are auth errors; anything else is a
   transport error and only triggers backoff.
@@ -299,8 +275,7 @@ Plain DTLS 1.2 with the parameters of the table above and no envelope; this
 is what cacggghp/vk-turn-proxy speaks. Each `Write` is one DTLS
 application_data record, so the relay sees DTLS content types (20..23) in
 the first byte. VK relays now shape this to about 9 KB/s per allocation
-(measured upstream by anton48, `pkg/proxy/proxy.go` in vk-turn-proxy-ios;
-not re-measured by this project). The mode is kept for compatibility with
+(as measured upstream by anton48). The mode is kept for compatibility with
 old servers and logs a deprecation warning when selected.
 
 ## 5. Control plane (`mux/control.go`)
@@ -453,6 +428,5 @@ Verified so far: the docker interop test in `test/integration/` runs
 `turnrelay-udp` in `srtp` mode with static coturn credentials against the
 unmodified anton48 `add-server-srtp-layer` server; the server accepted 4
 connections into one group, a WireGuard tunnel came up over the pipe and an
-HTTP request through it returned the expected body. The run against real
-VK relays (`docs/e2e.md`) and the `wrap` and `dtls` modes against their
-servers are covered by in-process tests only at the time of writing.
+HTTP request through it returned the expected body. Real VK relays are exercised through the VK provider end to end; the `wrap`
+and `dtls` modes against their servers are covered by in-process tests.

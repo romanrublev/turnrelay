@@ -1,8 +1,7 @@
-# Draft: sing-box RFC issue
+# sing-box integration proposal
 
-Draft of the issue to open in SagerNet/sing-box. Not posted yet.
-
----
+Draft text for an issue proposing a native `turnrelay` outbound in
+SagerNet/sing-box. See [ROADMAP.md](../ROADMAP.md).
 
 Title: `New outbound: turnrelay (tunnel through WebRTC TURN relays, e.g. VK Calls, for censorship circumvention)`
 
