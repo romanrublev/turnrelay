@@ -27,6 +27,22 @@ Reduce that risk:
   inner WireGuard session has its own. Do not treat the obfuscation layer as
   the confidentiality boundary - WireGuard is.
 
+## Proxy-exit mode
+
+With `server_type: exit` (the `turnrelay-server` deployment) there is no
+WireGuard: the confidentiality boundary is the per-allocation DTLS/SRTP, and
+the server dials destinations on your behalf. This adds two requirements.
+
+- A pre-shared `password` is mandatory and authenticates the session (an
+  HMAC of the session id). It is a shared secret: anyone who holds it can
+  dial through your server, so keep it secret and rotate it by changing
+  `password` on both ends. A server that dialed arbitrary destinations
+  without it would be an open proxy.
+- The server refuses private, loopback, link-local, multicast and
+  unspecified destinations by default, so a leaked password cannot be used to
+  reach the VPS's own network. `-allow-private` disables that; leave it off
+  unless you understand the consequence.
+
 ## Reporting a vulnerability
 
 Open an issue for non-sensitive reports. For anything that should not be

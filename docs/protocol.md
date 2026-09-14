@@ -8,10 +8,18 @@ Describes what the `turnrelay` library
 server implementer or a reviewer can check it against a packet capture.
 Every value below is taken from the library code.
 
-`turnrelay` tunnels UDP datagrams (in practice WireGuard) through WebRTC TURN
-relays, disguised as call media. VK Calls is one credential provider
-(`provider: vk`); any relay with known long-term credentials is another
-(`provider: static`). The transport itself does not depend on VK.
+`turnrelay` tunnels UDP datagrams through WebRTC TURN relays, disguised as
+call media. VK Calls is one credential provider (`provider: vk`); any relay
+with known long-term credentials is another (`provider: static`). The
+transport itself does not depend on VK.
+
+Sections 1 to 9 describe the datagram pipe and the WireGuard-fronted server
+(the default deployment): the tunnelled datagrams are WireGuard, and the VPS
+runs the upstream relay-side server in front of a WireGuard peer. Section 10
+describes the proxy-exit server (`server_type: exit`), an alternative
+server-side end that terminates the pipe and dials destinations itself, so
+WireGuard is optional; it adds the `auth` control frame (section 5) and its
+own inner framing on top of the same pipe.
 
 ## 1. Overview
 
@@ -301,10 +309,20 @@ Probe, 12 bytes:
 | 0 | 4 | `ff 50 4e 47` (`0xff`, `P`, `N`, `G`) |
 | 4 | 8 | sequence number, big-endian, per worker, starts at 1 |
 
+Auth, 20 bytes, sent only when a `password` is configured (the proxy-exit
+server of section 10; a WireGuard-fronted server never expects it):
+
+| Offset | Size | Value |
+|---|---|---|
+| 0 | 4 | `ff 41 55 54` (`0xff`, `A`, `U`, `T`) |
+| 4 | 16 | `HMAC-SHA256(password, session UUID)`, truncated to 16 bytes |
+
 When sent:
 
 - hello: immediately after the obfuscation handshake, before the worker is
   counted as active, and again after every probe;
+- auth: once per worker, immediately after the hello, only when a password is
+  set;
 - probe: every 30 s per worker, followed by a hello.
 
 Server behaviour (anton48 `-srtp` server): a hello is consumed, never
@@ -322,7 +340,9 @@ never a valid WireGuard first byte. A server that predates the control
 frames forwards them to WireGuard, which discards them as malformed; the
 tunnel still works, only without grouping and probe echo (that server also
 forwards the probe to WireGuard, so the zombie detector then relies on
-WireGuard's own traffic).
+WireGuard's own traffic). The `auth` frame is likewise `0xff`-prefixed, so a
+WireGuard-fronted server drops it as malformed; it is meaningful only to the
+proxy-exit server.
 
 ## 6. Multiplexing (`mux`)
 
@@ -405,7 +425,10 @@ single outage does not tax every later reconnect with the maximum wait.
 - `dtls`: same DTLS properties as `srtp`; deprecated for throughput reasons,
   not for security ones.
 - WireGuard is the layer that authenticates both ends and protects the
-  traffic; nothing in `turnrelay` weakens or replaces it.
+  traffic; nothing in `turnrelay` weakens or replaces it. In proxy-exit mode
+  (section 10) there is no WireGuard: the per-allocation DTLS/SRTP is then the
+  confidentiality boundary, and a pre-shared password authenticates the
+  session and gates the exit.
 - What VK sees: the anonymous-join chain (one display name and device id
   per credential), the number of participants (one per 10 connections) and
   the relayed byte counts per allocation; with `srtp` and `wrap` the payload
@@ -433,3 +456,69 @@ unmodified anton48 `add-server-srtp-layer` server; the server accepted 4
 connections into one group, a WireGuard tunnel came up over the pipe and an
 HTTP request through it returned the expected body. Real VK relays are exercised through the VK provider end to end; the `wrap`
 and `dtls` modes against their servers are covered by in-process tests.
+
+## 10. Proxy-exit mode (`server_type: exit`)
+
+The default deployment (sections 1 to 9) carries WireGuard datagrams to a
+WireGuard-fronted server. Proxy-exit mode replaces that server-side end with
+`turnrelay-server`, which terminates the transport and dials destinations
+itself, so no WireGuard is needed. Two client surfaces use it: the sing-box
+outbound with `"server_type": "exit"` (a normal TCP+UDP outbound) and
+`turnrelay-proxy`, a local SOCKS5 front. The credential chain, TURN usage,
+obfuscation (sections 2 to 4) and the datagram pipe (section 6) are
+unchanged; this section describes what rides inside the pipe.
+
+**Inner framing.** In exit mode every payload datagram on the pipe starts
+with a one-byte discriminator. Control frames keep their `0xff` prefix
+(section 5), so payload can never be mistaken for one.
+
+| First byte | Meaning | Body |
+|---|---|---|
+| `0x00` | KCP packet | one raw KCP packet |
+| `0x01` | UDP datagram | `[assoc BE u16][atyp][addr][port BE u16][payload]` |
+| `0xff` | control frame | hello / probe / auth (section 5) |
+
+`atyp`/`addr`/`port` use the SOCKS5 address form (`0x01` IPv4, `0x03` domain
+with a 1-byte length, `0x04` IPv6). Domains are resolved on the exit server
+(remote DNS, no client-side leak).
+
+**TCP (`0x00`).** One smux session runs over one KCP session over the pipe;
+each TCP connection is one smux stream that opens with a header
+`[0x01 CONNECT][atyp][addr][port]`, after which raw bytes flow both ways. KCP
+runs with no block cipher and no FEC: every allocation is already encrypted
+end to end by DTLS/SRTP, so KCP only supplies reliability and ordering over
+the striped, lossy pipe. KCP is tuned for that path (fast retransmit,
+`SetMtu(1200)` so a KCP packet plus the discriminator plus obfs overhead fits
+one relayed datagram); these are tunables, not wire constants.
+
+**UDP (`0x01`).** UDP does not go through KCP; each datagram is framed
+directly with an `assoc` id (one per client `ListenPacket`, so replies reach
+the conn that sent them) and the destination. The server keeps one outbound
+UDP socket per (session, assoc) and maps replies back into frames whose
+address is the reply source.
+
+**Authentication.** Exit mode requires a `password`. Each worker sends the
+`auth` frame (section 5) right after its hello; the server verifies
+`HMAC-SHA256(password, session UUID)` before it lets the allocation join the
+session. One check per allocation suffices: the session UUID travels only
+inside DTLS/SRTP and is 128 random bits, so an allocation cannot join another
+session without the password. Without auth a server that dials arbitrary
+destinations would be an open proxy.
+
+**Server behaviour.** `turnrelay-server` accepts the N obfuscated
+allocations, groups them by session UUID (as the WireGuard-fronted server
+does), merges the session's uplink into one stream and stripes downlink
+across its live allocations. It then runs `kcp.ServeConn` plus a smux server
+per session and dials each stream out, and forwards UDP frames from the
+per-association sockets. By default it refuses private, loopback, link-local,
+multicast and unspecified destinations (applied to the resolved IP), so a
+leaked password cannot turn the VPS into a proxy into its own network;
+`-allow-private` turns that off.
+
+**Security in exit mode.** There is no WireGuard, so the per-allocation
+DTLS/SRTP is the confidentiality boundary (see section 8) and the pre-shared
+password is what authenticates the session and gates the exit. The password
+is a shared secret: anyone who holds it can dial through the server, so it
+must be kept secret and rotated by changing `password` on both ends. The
+private-destination deny-list is the main thing limiting the blast radius of
+a leaked password.
