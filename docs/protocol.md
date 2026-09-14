@@ -194,8 +194,10 @@ type 100, which is what a WebRTC media stream looks like.
 
 ### 4.2 `wrap` (WDTT-WRAP-v1)
 
-Wire compatible with amurcanov/proxy-turn-vk-android and the WDTT server
-family. The envelope is applied to every datagram of the relayed PacketConn,
+Designed to be wire compatible with amurcanov/proxy-turn-vk-android and the
+WDTT server family (ported from `android-client/obfs.go`); not yet verified
+against a WDTT server, only against the in-process counterpart in
+`obfs/obfstest`. The envelope is applied to every datagram of the relayed PacketConn,
 including the DTLS handshake; inside it runs the plain DTLS session of
 section 4.3 and the payload is the DTLS record. The relay only ever sees
 RTP-looking packets.
@@ -348,7 +350,7 @@ From the design spec, section 8:
 | Condition | Behaviour |
 |---|---|
 | Credential fetch fails (network) | slot stays empty, retry with backoff, workers wait |
-| Captcha required | `CaptchaRequiredError`, slot cooldown 60 s, surfaced in Stats and log |
+| Captcha required | `CaptchaRequiredError`, pool-wide cooldown 60 s (no slot is fetched, workers borrow from slots that still have room), surfaced in Stats and log |
 | TURN 486 quota | slot marked saturated, worker retries with another slot |
 | TURN 401 / stale nonce | slot invalidated, re-fetch |
 | Handshake timeout | worker restart with backoff; in wrap mode reported as "password or wrap key not accepted" |
@@ -369,8 +371,11 @@ single outage does not tax every later reconnect with the maximum wait.
 ## 8. Security notes
 
 - TURN: long-term credentials authenticate the client to the relay
-  (MESSAGE-INTEGRITY over STUN). The relay sees the relayed payload, which is
-  always at least DTLS-encrypted; it never sees plaintext.
+  (MESSAGE-INTEGRITY over STUN). The relay sees the relayed payload: the
+  tunnelled datagrams are always encrypted (SRTP, the WRAP envelope, or DTLS
+  records), while the DTLS handshake itself is visible to the relay in
+  `srtp` and `dtls` mode (in `wrap` mode it sits inside the envelope). The
+  relay never sees a tunnelled datagram in plaintext.
 - `srtp`: DTLS-SRTP with an ephemeral ECDHE key exchange and a fresh
   self-signed certificate per connection. Certificates are not verified
   (the server is identified by address, not by key), so this layer gives

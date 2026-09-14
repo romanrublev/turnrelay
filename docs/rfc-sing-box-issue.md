@@ -95,11 +95,12 @@ repository. Modes: `srtp` is real DTLS-SRTP (RFC 5764, RTP payload type
 ChaCha20-Poly1305, HKDF key from a password) around plain DTLS, for the WDTT
 server family; `dtls` is the legacy plain DTLS, deprecated.
 
-Throughput figures are reported by the upstream iOS client author (anton48),
-not measured by us: VK relays shape raw DTLS to about 9 KB/s per allocation;
-SRTP gives about 200 KB/s per allocation, scaling linearly to about
-50 Mbit/s with 30 allocations; UDP versus TCP to the relay is about 66
-versus 21 Mbit/s. What we have verified ourselves is functional only: in a
+Throughput figures are not measured by us. The upstream iOS client author
+(anton48) reports that VK relays shape raw DTLS to about 9 KB/s per
+allocation and that SRTP gives about 200 KB/s per allocation, scaling
+linearly to about 50 Mbit/s with 30 allocations; the UDP versus TCP
+comparison (about 66 versus 21 Mbit/s to the relay) comes from reports by
+users of the iOS client. What we have verified ourselves is functional only: in a
 docker interop test the unmodified anton48 server accepts 4 connections in
 one group and a WireGuard tunnel with HTTP through it works.
 
@@ -122,6 +123,7 @@ projects: cacggghp/vk-turn-proxy (credential chain), anton48/vk-turn-proxy-ios
 amurcanov/proxy-turn-vk-android (WRAP-v1). No PolyForm Noncommercial code
 (amurcanov/csqtt) is used. Dependencies: pion/turn, pion/dtls, pion/srtp,
 pion/rtp, bogdanfinn/tls-client (Chrome TLS fingerprint for the VK API),
+github.com/sagernet/sing (the `N.Dialer` interface and `M.Socksaddr`),
 golang.org/x/crypto.
 
 ## Ask
@@ -134,6 +136,9 @@ Either outcome works for us:
 
 (b) external: keep the module `github.com/romanrublev/turnrelay` for
 graphical clients to register themselves; this needs no patch to sing-box.
+The library already implements sagernet/sing's `N.Dialer` (`DialContext`
+and `ListenPacket`), so a client can hand a `turnrelay.Dialer` to the
+`wireguard` endpoint as its detour today.
 
 Which do you prefer, and are there objections to the outbound shape (a
 UDP-only outbound used as the detour of the `wireguard` endpoint)?

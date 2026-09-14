@@ -1,7 +1,9 @@
 package obfs
 
-// WDTT-WRAP-v1 envelope, wire compatible with amurcanov/proxy-turn-vk-android
-// (android-client/obfs.go, GPL-3.0). Each datagram becomes one RTP-looking
+// WDTT-WRAP-v1 envelope, designed to be wire compatible with
+// amurcanov/proxy-turn-vk-android (ported from android-client/obfs.go,
+// GPL-3.0); not yet verified against a WDTT server, only against the
+// in-process counterpart in obfstest. Each datagram becomes one RTP-looking
 // packet: 12-byte header, ChaCha20-Poly1305 ciphertext, random padding and a
 // trailing padding-length byte (RTP P bit set). The nonce is derived from
 // the header, so the receiver needs only the key.
