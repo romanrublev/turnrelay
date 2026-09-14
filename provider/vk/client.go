@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -58,27 +59,17 @@ type Client struct {
 	Endpoints Endpoints
 	Sleep     func(time.Duration)
 	Logf      func(string, ...any)
+	// AutoCaptcha solves VK's proof-of-work captcha in place (see
+	// captcha_pow.go) up to CaptchaAttempts times before giving up.
+	AutoCaptcha     bool
+	CaptchaAttempts int
 }
 
-// publicResolverDialer bypasses the system resolver, which whitelisted
-// networks often break first.
-func publicResolverDialer() net.Dialer {
-	return net.Dialer{Timeout: 20 * time.Second, KeepAlive: 30 * time.Second, Resolver: &net.Resolver{
-		PreferGo: true,
-		Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			var d net.Dialer
-			var last error
-			for _, s := range []string{"77.88.8.8:53", "77.88.8.1:53", "8.8.8.8:53", "1.1.1.1:53"} {
-				c, err := d.DialContext(ctx, "udp", s)
-				if err == nil {
-					return c, nil
-				}
-				last = err
-			}
-			return nil, last
-		},
-	}}
-}
+const defaultCaptchaAttempts = 2
+
+// defaultResolver is shared by every client so cached answers survive
+// credential refreshes.
+var defaultResolver = newRacingResolver(publicResolvers, nil)
 
 // NewClient builds the VK API client with the Chrome TLS fingerprint and a
 // dialer that resolves names through public resolvers.
@@ -88,7 +79,7 @@ func NewClient() (*Client, error) {
 
 // NewClientWithDialer is NewClient with every TCP connection to the VK API
 // opened by dial (network "tcp", address host:port, name unresolved). The
-// public-resolver dialer of NewClient is then not used: resolving the name
+// racing public resolver of NewClient is then not used: resolving the name
 // is dial's job, which is what a sing-box detour or bind_interface dialer
 // expects. A nil dial is NewClient.
 func NewClientWithDialer(dial func(ctx context.Context, network, address string) (net.Conn, error)) (*Client, error) {
@@ -97,19 +88,25 @@ func NewClientWithDialer(dial func(ctx context.Context, network, address string)
 		tlsclient.WithClientProfile(profiles.Chrome_146),
 		tlsclient.WithCookieJar(tlsclient.NewCookieJar()),
 	}
-	if dial != nil {
-		opts = append(opts, tlsclient.WithDialContext(dial))
-	} else {
-		opts = append(opts, tlsclient.WithDialer(publicResolverDialer()))
+	if dial == nil {
+		dial = defaultResolver.DialContext
 	}
+	opts = append(opts, tlsclient.WithDialContext(dial))
 	hc, err := tlsclient.NewHttpClient(tlsclient.NewNoopLogger(), opts...)
 	if err != nil {
 		return nil, fmt.Errorf("vk: http client: %w", err)
 	}
-	return &Client{HTTP: hc, Endpoints: DefaultEndpoints, Sleep: time.Sleep, Logf: func(string, ...any) {}}, nil
+	return &Client{HTTP: hc, Endpoints: DefaultEndpoints, Sleep: time.Sleep, Logf: func(string, ...any) {}, AutoCaptcha: true, CaptchaAttempts: defaultCaptchaAttempts}, nil
 }
 
 func (c *Client) post(ctx context.Context, url, form string) (map[string]any, error) {
+	return c.postWith(ctx, url, form, "https://vk.ru", nil)
+}
+
+// postWith is post with the Origin/Referer of the page that would issue the
+// request in a browser (vk.ru for the calls API, id.vk.ru for the captcha)
+// and an optional hook that adjusts the headers before sending.
+func (c *Client) postWith(ctx context.Context, url, form, origin string, adjust func(fhttp.Header)) (map[string]any, error) {
 	req, err := fhttp.NewRequestWithContext(ctx, "POST", url, bytes.NewBufferString(form))
 	if err != nil {
 		return nil, err
@@ -121,11 +118,14 @@ func (c *Client) post(ctx context.Context, url, form string) (map[string]any, er
 	h.Set("sec-ch-ua-platform", `"Windows"`)
 	h.Set("Content-Type", "application/x-www-form-urlencoded")
 	h.Set("Accept", "*/*")
-	h.Set("Origin", "https://vk.ru")
-	h.Set("Referer", "https://vk.ru/")
+	h.Set("Origin", origin)
+	h.Set("Referer", origin+"/")
 	h.Set("Sec-Fetch-Site", "same-site")
 	h.Set("Sec-Fetch-Mode", "cors")
 	h.Set("Sec-Fetch-Dest", "empty")
+	if adjust != nil {
+		adjust(h)
+	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		return nil, err
@@ -199,14 +199,45 @@ func (c *Client) fetchWith(ctx context.Context, link string, a app) (Credential,
 	_, _ = c.post(ctx, e.API+"calls.getCallPreview?v=5.275&client_id="+a.id, "vk_join_link="+joinURL+"&fields=photo_200&access_token="+token1Esc)
 	c.Sleep(300 * time.Millisecond)
 	// 3. anonymous call token; captcha shows up here
-	r, err = c.post(ctx, e.API+"calls.getAnonymousToken?v=5.275&client_id="+a.id, "vk_join_link="+joinURL+"&name="+neturl.QueryEscape(randomName())+"&access_token="+token1Esc)
-	if err != nil {
-		return Credential{}, err
+	tokenForm := "vk_join_link=" + joinURL + "&name=" + neturl.QueryEscape(randomName())
+	var resp map[string]any
+	for attempt := 0; ; attempt++ {
+		r, err = c.post(ctx, e.API+"calls.getAnonymousToken?v=5.275&client_id="+a.id, tokenForm+"&access_token="+token1Esc)
+		if err != nil {
+			return Credential{}, err
+		}
+		eo, isErr := r["error"].(map[string]any)
+		if !isErr {
+			resp, _ = r["response"].(map[string]any)
+			break
+		}
+		apiErr := vkAPIError(eo)
+		var ce *provider.CaptchaRequiredError
+		if !errors.As(apiErr, &ce) {
+			return Credential{}, apiErr
+		}
+		attempts := c.CaptchaAttempts
+		if attempts <= 0 {
+			attempts = defaultCaptchaAttempts
+		}
+		if !c.AutoCaptcha || attempt >= attempts {
+			return Credential{}, ce
+		}
+		success, serr := c.solveCaptcha(ctx, ce)
+		if serr != nil {
+			c.Logf("vk: captcha auto-solve failed: %v", serr)
+			ce.SolveErr = serr
+			return Credential{}, ce
+		}
+		c.Logf("vk: captcha solved, retrying getAnonymousToken")
+		if ce.Attempt == "" || ce.Attempt == "0" {
+			ce.Attempt = "1"
+		}
+		tokenForm = "vk_join_link=" + joinURL + "&name=" + neturl.QueryEscape(randomName()) +
+			"&captcha_key=&captcha_sid=" + neturl.QueryEscape(ce.Sid) + "&is_sound_captcha=0" +
+			"&success_token=" + neturl.QueryEscape(success) + "&captcha_ts=" + neturl.QueryEscape(ce.Ts) +
+			"&captcha_attempt=" + neturl.QueryEscape(ce.Attempt)
 	}
-	if eo, ok := r["error"].(map[string]any); ok {
-		return Credential{}, vkAPIError(eo)
-	}
-	resp, _ := r["response"].(map[string]any)
 	token2 := str(resp["token"])
 	if token2 == "" {
 		return Credential{}, missing("calls.getAnonymousToken", "response.token", r)

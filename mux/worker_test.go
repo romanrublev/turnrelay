@@ -174,7 +174,13 @@ func TestUplinkPacketSurvivesWorkerDeath(t *testing.T) {
 	if w.failedWrites() == 0 {
 		t.Fatal("the failing conn never saw a payload write; put-back path not exercised")
 	}
-	if st := p.Stats(); st.Restarts < 1 {
-		t.Fatalf("expected the failing worker to restart: %+v", st)
+	// The failing worker's restart is asynchronous with the last Read; give
+	// it a moment rather than asserting the instant the payload arrived.
+	deadline := time.Now().Add(5 * time.Second)
+	for p.Stats().Restarts < 1 {
+		if time.Now().After(deadline) {
+			t.Fatalf("expected the failing worker to restart: %+v", p.Stats())
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }

@@ -25,10 +25,14 @@ func (c Credential) Relay(i int) string {
 
 type Fetcher func(ctx context.Context, link string) (Credential, error)
 
-// CaptchaRequiredError: the provider needs a human. The library never solves
-// captchas; callers cool down or surface it.
+// CaptchaRequiredError: the provider could not get past a captcha. Providers
+// may attempt an automatic solve first; when that fails, callers cool down
+// or surface it. Ts and Attempt are echoed back by the VK retry.
 type CaptchaRequiredError struct {
 	Sid, RedirectURI, SessionToken, Img string
+	Ts, Attempt                         string
+	// SolveErr is why the automatic solve failed, if one was attempted.
+	SolveErr error
 }
 
 func (e *CaptchaRequiredError) Error() string {

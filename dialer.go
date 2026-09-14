@@ -34,7 +34,14 @@ const (
 type CaptchaPolicy string
 
 const (
+	// CaptchaAuto solves VK's proof-of-work captcha in place and only
+	// reports a captcha when that fails (default).
+	CaptchaAuto CaptchaPolicy = "auto"
+	// CaptchaFail never attempts a solve: the pool cools down and the
+	// captcha is surfaced through Stats and the log.
 	CaptchaFail CaptchaPolicy = "fail"
+	// CaptchaWait is CaptchaFail today; kept so configs stay valid once a
+	// callback for graphical clients exists.
 	CaptchaWait CaptchaPolicy = "wait"
 )
 
@@ -99,6 +106,13 @@ func New(cfg Config) (*Dialer, error) {
 		fetcher  = cfg.Fetcher
 		override string
 	)
+	switch cfg.Captcha {
+	case "":
+		cfg.Captcha = CaptchaAuto
+	case CaptchaAuto, CaptchaFail, CaptchaWait:
+	default:
+		return nil, fmt.Errorf("turnrelay: captcha policy must be %q, %q or %q, got %q", CaptchaAuto, CaptchaFail, CaptchaWait, cfg.Captcha)
+	}
 	switch cfg.Provider {
 	case ProviderVK:
 		if len(cfg.CallLinks) == 0 {
@@ -118,6 +132,7 @@ func New(cfg Config) (*Dialer, error) {
 				return nil, err
 			}
 			client.Logf = cfg.Logf
+			client.AutoCaptcha = cfg.Captcha == CaptchaAuto
 			fetcher = client.Fetch
 		}
 	case ProviderStatic:
@@ -150,17 +165,6 @@ func New(cfg Config) (*Dialer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("turnrelay: %w", err)
 	}
-	switch cfg.Captcha {
-	case "":
-		cfg.Captcha = CaptchaFail
-	case CaptchaFail, CaptchaWait:
-	default:
-		return nil, fmt.Errorf("turnrelay: captcha policy must be %q or %q, got %q", CaptchaFail, CaptchaWait, cfg.Captcha)
-	}
-	// Both policies currently behave the same inside the library: the pool
-	// reports the captcha, cools down for a minute, and workers retry with
-	// backoff. "wait" is accepted so configs stay valid once M2 wires a
-	// callback for graphical clients.
 	udp := true
 	if cfg.TURNUDP != nil {
 		udp = *cfg.TURNUDP

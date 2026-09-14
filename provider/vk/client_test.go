@@ -18,22 +18,46 @@ import (
 )
 
 type fakeDoer struct {
-	t      *testing.T
-	calls  []string
-	resp   map[string]string // url path -> body, consumed in order per path
-	status map[string]int    // url path -> HTTP status, 200 when absent
+	t           *testing.T
+	calls       []string
+	resp        map[string]string   // url path -> body
+	seq         map[string][]string // url path -> bodies consumed in order, before resp
+	status      map[string]int      // url path -> HTTP status, 200 when absent
+	getHeaders  map[string]fhttp.Header
+	postHeaders map[string]fhttp.Header
 }
 
 func (f *fakeDoer) Do(r *fhttp.Request) (*fhttp.Response, error) {
-	body, _ := io.ReadAll(r.Body)
+	var body []byte
+	if r.Body != nil {
+		body, _ = io.ReadAll(r.Body)
+	}
 	f.calls = append(f.calls, r.URL.Host+r.URL.Path+"?"+string(body))
 	key := r.URL.Host + r.URL.Path
+	if r.Method == "GET" {
+		if f.getHeaders == nil {
+			f.getHeaders = map[string]fhttp.Header{}
+		}
+		f.getHeaders[key] = r.Header.Clone()
+	} else {
+		if f.postHeaders == nil {
+			f.postHeaders = map[string]fhttp.Header{}
+		}
+		f.postHeaders[key] = r.Header.Clone()
+	}
 	if strings.Contains(string(body), "method=vchat.joinConversationByLink") {
 		key += "#join"
 	} else if strings.Contains(string(body), "method=auth.anonymLogin") {
 		key += "#login"
 	}
-	b, ok := f.resp[key]
+	var b string
+	var ok bool
+	if q := f.seq[key]; len(q) > 0 {
+		b, ok = q[0], true
+		f.seq[key] = q[1:]
+	} else {
+		b, ok = f.resp[key]
+	}
 	if !ok {
 		f.t.Fatalf("unexpected request %s", key)
 	}

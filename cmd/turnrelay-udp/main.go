@@ -42,6 +42,7 @@ func main() {
 	turnServer := flag.String("turn", "", "TURN relay host:port (required for static, optional override for vk)")
 	tcp := flag.Bool("tcp", false, "use TCP to the TURN relay (slower)")
 	statsEvery := flag.Duration("stats", 10*time.Second, "stats log interval")
+	captcha := flag.String("captcha", "auto", "VK captcha policy: auto (solve the proof-of-work captcha) | fail")
 	flag.Parse()
 
 	ap, err := netip.ParseAddrPort(*server)
@@ -59,7 +60,8 @@ func main() {
 		Provider: *prov, CallLinks: ls, TURNServer: *turnServer, TURNUsername: *turnUser, TURNPassword: *turnPass,
 		Server: ap, Connections: *n, Mode: turnrelay.Mode(*mode),
 		Password: *password, WrapKey: key, TURNUDP: &udp,
-		Logf: log.Printf,
+		Captcha: turnrelay.CaptchaPolicy(*captcha),
+		Logf:    log.Printf,
 	})
 	if err != nil {
 		log.Fatal(err)

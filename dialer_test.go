@@ -156,7 +156,7 @@ func TestConfigValidation(t *testing.T) {
 	if _, err := turnrelay.New(base); err != nil {
 		t.Fatalf("valid config rejected: %v", err)
 	}
-	for _, pol := range []turnrelay.CaptchaPolicy{turnrelay.CaptchaFail, turnrelay.CaptchaWait} {
+	for _, pol := range []turnrelay.CaptchaPolicy{turnrelay.CaptchaAuto, turnrelay.CaptchaFail, turnrelay.CaptchaWait} {
 		c := base
 		c.Captcha = pol
 		if _, err := turnrelay.New(c); err != nil {

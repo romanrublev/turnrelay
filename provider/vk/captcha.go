@@ -23,9 +23,22 @@ func vkAPIError(obj map[string]any) error {
 		if u, err := neturl.Parse(ce.RedirectURI); err == nil {
 			ce.SessionToken = u.Query().Get("session_token")
 		}
+		ce.Ts = numOrString(obj["captcha_ts"])
+		ce.Attempt = numOrString(obj["captcha_attempt"])
 		return ce
 	}
 	return fmt.Errorf("vk: API error %d: %s", int(code), msg)
 }
 
 func str(v any) string { s, _ := v.(string); return s }
+
+// numOrString renders a JSON field VK sends either as a number or a string.
+func numOrString(v any) string {
+	switch x := v.(type) {
+	case string:
+		return x
+	case float64:
+		return fmt.Sprintf("%.0f", x)
+	}
+	return ""
+}
