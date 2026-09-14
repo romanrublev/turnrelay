@@ -65,7 +65,7 @@ Two deployments, same building blocks:
 
 ## Install
 
-Requires Go 1.25+.
+Requires Go 1.27+.
 
 ```bash
 go install github.com/romanrublev/turnrelay/cmd/turnrelay-udp@latest
