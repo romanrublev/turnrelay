@@ -35,9 +35,17 @@ Optional second and third arguments override the WireGuard port (default
 
 The script is idempotent: re-running it does not regenerate the WireGuard
 keys, does not re-download Go or re-clone `anton48/vk-turn-proxy` if already
-present, and never issues `iptables` commands itself (the MASQUERADE rule
-lives in `wg0.conf`'s `PostUp`/`PostDown`, applied once per `wg-quick`
-up/down by `wg-quick` itself).
+present, and never issues `iptables` commands itself (the MASQUERADE rule and
+the loopback-only rule below both live in `wg0.conf`'s `PostUp`/`PostDown`,
+applied once per `wg-quick` up/down by `wg-quick` itself).
+
+Only the proxy port (56004 by default) ends up reachable from the internet;
+that is where the VK relay connects. The WireGuard port (51820 by default)
+is only ever dialed locally, from the anton48 server over loopback, so the
+script firewalls it to loopback-only with an `iptables -A INPUT -p udp
+--dport <wg-port> ! -i lo -j DROP` rule and does not open it in `ufw`. A
+publicly reachable WireGuard port would be trivially fingerprintable by
+scanners and would defeat the point of disguising the traffic as SRTP.
 
 It installs Go from the official go.dev tarball rather than
 `apt-get install golang-go`, because the anton48 server's `go.mod` asks for a
@@ -54,6 +62,7 @@ client private key:  <...>
 proxy endpoint:      <vps-ip>:56004
 wg client address:   10.8.0.2/32
 wg server address:   10.8.0.1
+firewall:            56004/udp public, 51820/udp loopback-only (iptables DROP)
 anton48 commit:      <pinned commit>
 go version:          <pinned version>
 ```
@@ -110,19 +119,22 @@ PostDown = ip route del 155.212.192.0/20 via <physical-gateway> dev <physical-if
 
 Find `<physical-gateway>` and `<physical-iface>` with
 `ip route show default` before bringing the tunnel up. `155.212.192.0/20` is
-the known VK relay block; confirm the relay address(es) your run actually
-used by checking the `turnrelay-udp` log for `via <relay>` (see step 3) and
-adjust the excluded range if a session lands outside it.
+the relay range documented by the upstream project for call traffic
+(cacggghp/vk-turn-proxy README, <https://github.com/cacggghp/vk-turn-proxy>);
+it is not something this project measured independently. Confirm the relay
+address(es) your run actually used by checking the `turnrelay-udp` log for
+`via <relay>` (see step 3) and adjust the excluded range if a session lands
+outside it.
 
 **Option B: an AllowedIPs calculator (more portable, e.g. mobile clients
 without PostUp scripting).**
 
 Use the calculator at
 <https://www.procustodibus.com/blog/2021/03/wireguard-allowedips-calculator/>,
-enter `155.212.192.0/20` as the range to exclude from `0.0.0.0/0`, and paste
-the resulting list of CIDR blocks directly into `AllowedIPs`. No `PostUp`
-route is needed with this approach because the exclusion is baked into the
-route list itself.
+enter `155.212.192.0/20` (the range from the cacggghp README, see above) as
+the range to exclude from `0.0.0.0/0`, and paste the resulting list of CIDR
+blocks directly into `AllowedIPs`. No `PostUp` route is needed with this
+approach because the exclusion is baked into the route list itself.
 
 Either way, do not bring `wg-vk.conf` up yet.
 
@@ -144,6 +156,17 @@ allocation; note it down, it is what step 2's exclusion is protecting.
 Do not proceed until you see at least `worker 0 up`; for the full acceptance
 run you want all 30 workers up (watch the periodic `stats:` line, described
 below).
+
+Every `-stats` interval (10s here), `turnrelay-udp` also logs a line like:
+
+```
+stats: {Workers:30 Active:30 Connecting:0 Restarts:0 CredSlots:3 CaptchaUntil:0001-01-01 00:00:00 +0000 UTC LastError:}
+```
+
+That is Go's default struct formatting (`%+v`), so there is no space after
+each field's colon; `grep 'stats:'` on the log to follow it, and match
+literally on `Active:30` / `CaptchaUntil:0001-01-01` (no spaces) rather than
+`Active: 30`.
 
 ## 4. Bring up the tunnel and test
 
@@ -178,10 +201,11 @@ All of the following must hold for the run to count as passing:
 - `iperf3 -c 10.8.0.1 -R -t 30` reports at least 30 Mbit/s average over the
   30-second reverse transfer, with 30 connections active on the
   `turnrelay-udp` side (see next point) for the whole run.
-- The `turnrelay-udp` periodic `stats:` line shows `Active: 30` (all 30
-  allocations up, none restarting) and `CaptchaUntil` is the zero time
-  (`0001-01-01 00:00:00 +0000 UTC`), i.e. no captcha was ever triggered
-  during the run.
+- The `turnrelay-udp` periodic `stats:` line (see step 3 for its exact,
+  space-free format) shows `Active:30` (all 30 allocations up, none
+  restarting) and `CaptchaUntil` is the zero time
+  (`CaptchaUntil:0001-01-01 00:00:00 +0000 UTC`), i.e. no captcha was ever
+  triggered during the run.
 
 Record after the run, in this file or in the task report: the date, VPS
 provider/region, measured throughput (Mbit/s), the `Active`/`Restarts`
@@ -190,7 +214,7 @@ address(es) seen in the `via <relay>` log lines.
 
 ## Troubleshooting
 
-- **Credential pool reports a captcha (`CaptchaUntil` set to a future
+- **Credential pool reports a captcha (`CaptchaUntil:` set to a future
   time in the stats line, or a log line mentioning captcha):** VK is rate
   limiting credential requests. Restart with fewer connections, e.g. `-n 10`,
   and wait for `CaptchaUntil` to pass before trying again or ramping back up.
@@ -206,9 +230,11 @@ address(es) seen in the `via <relay>` log lines.
   handshake):** check `-server <vps-ip>:56004` matches the proxy port
   `vps-setup.sh` opened (default 56004), and that the VPS firewall/cloud
   security group allows inbound UDP on that port from the internet (the VK
-  relay, not your laptop, is what connects to it). Also confirm at least one
-  `mux: worker N up` line appeared before `wg-quick up` was run: without a
-  live worker there is nothing to carry the handshake.
+  relay, not your laptop, is what connects to it). The WireGuard port itself
+  (51820 by default) is deliberately loopback-only on the VPS, see step 1;
+  do not open it in the cloud security group, that is not the fix. Also
+  confirm at least one `mux: worker N up` line appeared before `wg-quick up`
+  was run: without a live worker there is nothing to carry the handshake.
 
 - **Tunnel comes up but traffic stalls or fragments:** confirm `MTU = 1280`
   in `wg-vk.conf`; the relay and obfuscation framing leaves less room for the

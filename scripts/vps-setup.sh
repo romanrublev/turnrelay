@@ -7,10 +7,19 @@
 # Safe to re-run: it does not regenerate WireGuard keys that already exist,
 # does not re-download Go or re-clone the anton48 source if already present,
 # and never calls iptables directly (the only iptables rules are the
-# PostUp/PostDown MASQUERADE lines inside wg0.conf, which wg-quick itself
+# PostUp/PostDown lines inside wg0.conf -- MASQUERADE plus a rule that keeps
+# the WireGuard port loopback-only, see below -- which wg-quick itself
 # adds/removes exactly once per up/down; systemctl enable --now does not
 # restart an already-running unit, so re-running this script does not
 # duplicate them).
+#
+# Only the proxy port ($PXPORT) is meant to be reachable from the internet:
+# that is where the VK relay connects. The WireGuard port ($WGPORT) is only
+# ever dialed locally, by the anton48 server over loopback (see the
+# systemd unit's -connect 127.0.0.1:$WGPORT below). Exposing the WireGuard
+# port publicly would hand scanners a fingerprintable WireGuard endpoint,
+# defeating the whole point of tunneling it inside the SRTP disguise, so
+# this script firewalls it to loopback only and does not open it in ufw.
 set -euo pipefail
 
 PUB=${1:?usage: vps-setup.sh <public-ip> [wg-port=51820] [proxy-port=56004]}
@@ -97,6 +106,12 @@ ListenPort = $WGPORT
 PrivateKey = $(cat server.key)
 PostUp = iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -o $IFACE -j MASQUERADE
 PostDown = iptables -t nat -D POSTROUTING -s 10.8.0.0/24 -o $IFACE -j MASQUERADE
+# Keep the WireGuard port itself off the public internet: only the anton48
+# server, over loopback, ever needs to reach it. A publicly reachable
+# WireGuard port is trivially fingerprintable and would defeat the SRTP
+# disguise, so drop anything for this port that did not arrive on lo.
+PostUp = iptables -A INPUT -p udp --dport $WGPORT ! -i lo -j DROP
+PostDown = iptables -D INPUT -p udp --dport $WGPORT ! -i lo -j DROP
 [Peer]
 PublicKey = $(cat client.pub)
 AllowedIPs = 10.8.0.2/32
@@ -125,9 +140,10 @@ systemctl daemon-reload
 systemctl enable --now turnrelay-server
 
 echo "==> firewall"
+# Only the proxy port is public; the WireGuard port stays loopback-only via
+# the iptables INPUT DROP rule in wg0.conf's PostUp/PostDown above.
 if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
 	ufw allow "$PXPORT"/udp
-	ufw allow "$WGPORT"/udp
 fi
 
 echo
@@ -137,6 +153,7 @@ echo "client private key:  $(cat client.key)"
 echo "proxy endpoint:      $PUB:$PXPORT"
 echo "wg client address:   10.8.0.2/32"
 echo "wg server address:   10.8.0.1"
+echo "firewall:            $PXPORT/udp public, $WGPORT/udp loopback-only (iptables DROP)"
 echo
 echo "anton48 commit:      $VKPROXY_COMMIT"
 echo "go version:          $GO_VERSION"
