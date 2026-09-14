@@ -17,15 +17,20 @@ type worker struct {
 }
 
 // run keeps one allocation alive for the lifetime of ctx, restarting it
-// with backoff after any failure.
+// with backoff after any failure. The backoff ladder resets once a session
+// was healthy (it reached the active state, or simply outlived BackoffMax),
+// so one outage does not tax every later reconnect with the maximum wait.
 func (w *worker) run(ctx context.Context) {
-	backoff := w.pool.o.BackoffMin
+	var backoff time.Duration
 	for {
-		err := w.once(ctx)
+		start := time.Now()
+		reached, err := w.once(ctx)
 		if ctx.Err() != nil {
 			return
 		}
 		w.pool.restarts.Add(1)
+		healthy := reached || time.Since(start) > w.pool.o.BackoffMax
+		backoff = nextBackoff(backoff, healthy, w.pool.o.BackoffMin, w.pool.o.BackoffMax)
 		if err != nil {
 			w.pool.setErr(err)
 			w.pool.o.Logf("mux: worker %d: %v; retry in %v", w.id, err, backoff)
@@ -35,15 +40,26 @@ func (w *worker) run(ctx context.Context) {
 			return
 		case <-time.After(jitter(backoff)):
 		}
-		backoff = min(backoff*2, w.pool.o.BackoffMax)
 	}
 }
 
-func (w *worker) once(ctx context.Context) (err error) {
+// nextBackoff returns the delay before the next attempt given the previous
+// one. A healthy session (or the very first failure, prev == 0) starts the
+// ladder over at minB; otherwise the delay doubles up to maxB.
+func nextBackoff(prev time.Duration, healthy bool, minB, maxB time.Duration) time.Duration {
+	if healthy || prev <= 0 {
+		return minB
+	}
+	return min(prev*2, maxB)
+}
+
+// once runs one allocation to completion. reached reports whether the
+// session got as far as the active state, which run uses to reset backoff.
+func (w *worker) once(ctx context.Context) (reached bool, err error) {
 	p := w.pool
 	lease, err := p.o.Creds.Acquire(ctx, w.id)
 	if err != nil {
-		return err
+		return false, err
 	}
 	server := lease.Cred.Relay(lease.Index)
 	if p.o.TURNOverride != "" {
@@ -57,7 +73,7 @@ func (w *worker) once(ctx context.Context) (err error) {
 	if err != nil {
 		p.connecting.Add(-1)
 		p.o.Creds.Failed(lease, err)
-		return err
+		return false, err
 	}
 	defer p.o.Creds.Release(lease)
 	defer alloc.Close()
@@ -71,19 +87,20 @@ func (w *worker) once(ctx context.Context) (err error) {
 	case p.handshakes <- struct{}{}:
 	case <-ctx.Done():
 		p.connecting.Add(-1)
-		return ctx.Err()
+		return false, ctx.Err()
 	}
 	conn, err := p.o.Wrapper.Client(wctx, alloc.Relayed(), p.o.Peer)
 	<-p.handshakes
 	p.connecting.Add(-1)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer conn.Close()
 
 	if _, err := conn.Write(EncodeHello(p.session)); err != nil {
-		return err
+		return false, err
 	}
+	reached = true
 	p.active.Add(1)
 	p.broadcastReady()
 	defer p.active.Add(-1)
@@ -101,13 +118,16 @@ func (w *worker) once(ctx context.Context) (err error) {
 				errCh <- nil
 				return
 			case pkt := <-p.up:
+				// Teardown raced the steal: this conn is dead or dying and a
+				// write could "succeed" into a gone allocation. Hand the
+				// packet back for a live worker instead.
+				if wctx.Err() != nil {
+					p.requeue(ctx, pkt)
+					errCh <- nil
+					return
+				}
 				if _, err := conn.Write(pkt); err != nil {
-					// Put it back so another worker carries it: the queue is
-					// the only place a datagram may wait, never the floor.
-					select {
-					case p.up <- pkt:
-					default:
-					}
+					p.requeue(ctx, pkt)
 					errCh <- err
 					return
 				}
@@ -171,12 +191,12 @@ func (w *worker) once(ctx context.Context) (err error) {
 	cancel()
 	_ = conn.SetReadDeadline(time.Now())
 	if ctx.Err() != nil {
-		return nil
+		return reached, nil
 	}
 	if err == nil {
 		err = net.ErrClosed
 	}
-	return err
+	return reached, err
 }
 
 func jitter(d time.Duration) time.Duration {
