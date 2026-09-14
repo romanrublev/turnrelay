@@ -191,3 +191,30 @@ sing-box с endpoint `wireguard`, чей пир - локальный мост. �
   что WireGuard-клиенты делают рукопожатие, но трафика нет. Скрипт настройки
   добавляет правила `FORWARD` accept для `wg0`; добавьте их вручную, если ваш
   сервер старше.
+
+## Сервер-выход (без WireGuard)
+
+`turnrelay-server` сам терминирует транспорт и подключается к адресам
+назначения, так что VPS не нужен WireGuard, а клиенту не нужен endpoint
+`wireguard`. Требуется общий пароль: сервер, подключающийся к произвольным
+адресам без пароля, - это открытый прокси. По умолчанию он отказывает в
+приватных, loopback и link-local адресах назначения (измените это через
+`-allow-private`).
+
+```bash
+sudo PASSWORD='choose-a-long-random-password' bash scripts/vps-setup-exit.sh
+```
+
+Флаги (`turnrelay-server -h`): `-listen` (по умолчанию `:56004`), `-mode`
+(`srtp` по умолчанию, `wrap`, `dtls`), `-password` или `TURNRELAY_PASSWORD`,
+`-bind`, `-allow-private`, `-dial-timeout`, `-max-streams`, `-udp-timeout`.
+
+Клиенты: в sing-box установите `"server_type": "exit"` и `"password"` в
+outbound `turnrelay` и уберите endpoint `wireguard` - outbound станет обычным
+TCP+UDP proxy outbound. Без sing-box запустите локальный SOCKS5-прокси:
+
+```bash
+turnrelay-proxy -server <vps-ip>:56004 -password '...' -links https://vk.ru/call/join/<hash>
+```
+
+и направьте любой SOCKS5-клиент на `127.0.0.1:1080`.

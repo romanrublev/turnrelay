@@ -114,6 +114,13 @@ as a plain UDP socket that a WireGuard client points its `Endpoint` at.
 `127.0.0.1:9000` and let its rules do the routing. A minimal config and the
 key material are in [docs/server-setup.md](docs/server-setup.md).
 
+**No WireGuard?** Run `turnrelay-server` on the VPS instead of the relay-side
+server: it terminates the transport and dials destinations itself, password
+authenticated. sing-box then sets `"server_type": "exit"` on the `turnrelay`
+outbound and needs no `wireguard` endpoint; without sing-box, `turnrelay-proxy`
+is a local SOCKS5 front for any other client. See
+[docs/server-setup.md](docs/server-setup.md#exit-server-no-wireguard).
+
 ## Configuration
 
 `turnrelay-udp` flags:

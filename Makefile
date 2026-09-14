@@ -5,6 +5,8 @@ vet:
 	go vet ./...
 build:
 	CGO_ENABLED=0 go build -o bin/turnrelay-udp ./cmd/turnrelay-udp
+	CGO_ENABLED=0 go build -o bin/turnrelay-server ./cmd/turnrelay-server
+	CGO_ENABLED=0 go build -o bin/turnrelay-proxy ./cmd/turnrelay-proxy
 # Docker interop test against coturn, the unmodified anton48 SRTP server and
 # a real WireGuard. Manual, not part of go test.
 integration:

@@ -115,6 +115,13 @@ turnrelay-udp \
 чей пир - `127.0.0.1:9000`, и пусть его правила решают маршрутизацию.
 Минимальный конфиг и ключи - в [docs/server-setup.ru.md](docs/server-setup.ru.md).
 
+**Без WireGuard?** Запустите на VPS `turnrelay-server` вместо серверной части
+релея: он сам терминирует транспорт и подключается к адресам назначения, с
+аутентификацией по паролю. sing-box тогда устанавливает `"server_type":
+"exit"` в outbound `turnrelay`, и endpoint `wireguard` не нужен; без sing-box
+`turnrelay-proxy` - локальный SOCKS5-фронт для любого другого клиента. См.
+[docs/server-setup.ru.md](docs/server-setup.ru.md#сервер-выход-без-wireguard).
+
 ## Настройка
 
 Флаги `turnrelay-udp`:
