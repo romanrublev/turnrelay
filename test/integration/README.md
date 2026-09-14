@@ -19,7 +19,7 @@ One bridge network, `172.28.0.0/24`:
 | `coturn`   | 172.28.0.10  | `coturn/coturn:4.6`, long-term creds `user:pass`, relay ports 49152-49200 |
 | `vkserver` | 172.28.0.20  | upstream server built from git, `-listen 0.0.0.0:56004 -connect 172.28.0.30:51820 -srtp` |
 | `wgserver` | 172.28.0.30  | Alpine + wireguard-tools, `wg/server.conf`, ip_forward + MASQUERADE  |
-| `web`      | 172.28.0.40  | `hashicorp/http-echo -text=ok-through-relay -listen=:5678`           |
+| `web`      | 172.28.0.40  | `hashicorp/http-echo:1.0 -text=ok-through-relay -listen=:5678`       |
 | `client`   | 172.28.0.50  | `turnrelay-udp` built from this repo + wireguard-tools + curl        |
 
 Path of a packet from the client:
@@ -39,7 +39,11 @@ Path of a packet from the client:
 
 It exits 0 only on a match. On any failure it dumps the `turnrelay-udp` log
 and `wg show` and exits 1; `run.sh` propagates that status, prints the
-server's `group`/`conn` log lines and tears the lab down.
+server's `group`/`conn` log lines and tears the lab down. `run.sh` then
+also checks the server log: it must contain `conn N joined group <hex>`
+for at least `CONNS` connections, all with the same group id, otherwise
+the run fails even if the HTTP fetch worked (the tunnel would then be
+running over unpooled single connections).
 
 Expected server log:
 
@@ -61,4 +65,9 @@ committed on purpose. Do not reuse them anywhere.
 ## Knobs
 
 `client.sh` reads `CONNS` (default 4), `TURN` and `SERVER` from the
-environment, e.g. `docker compose run --rm -e CONNS=8 client`.
+environment, e.g. `docker compose run --rm -e CONNS=8 client`. `CONNS=8
+./run.sh` passes the same value to both the client and the group check.
+
+The upstream server is built from a pinned commit (`VKPROXY_COMMIT` in
+`Dockerfile.vkserver`, the same one `scripts/vps-setup.sh` installs on the
+VPS).

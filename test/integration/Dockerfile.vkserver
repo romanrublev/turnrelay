@@ -1,9 +1,13 @@
-# Unmodified upstream anton48/vk-turn-proxy server, branch add-server-srtp-layer.
+# Unmodified upstream anton48/vk-turn-proxy server, branch add-server-srtp-layer,
+# pinned to the same commit as scripts/vps-setup.sh (VKPROXY_COMMIT) so the
+# lab and the VPS run the code this client was validated against.
 # Its go.mod asks for go 1.25.5; golang:1.26-alpine satisfies that.
 FROM golang:1.26-alpine AS build
+ARG VKPROXY_COMMIT=37d6607f5c8f3bc4c84595874c6dafa0f5b1d847
 RUN apk add --no-cache git
 WORKDIR /src
-RUN git clone --depth 1 -b add-server-srtp-layer https://github.com/anton48/vk-turn-proxy .
+RUN git clone -b add-server-srtp-layer https://github.com/anton48/vk-turn-proxy . \
+ && git checkout --detach "$VKPROXY_COMMIT"
 RUN CGO_ENABLED=0 go build -o /out/server ./server
 
 FROM alpine:3.22
