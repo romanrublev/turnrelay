@@ -134,32 +134,24 @@ Lifetime and quota (`credpool`):
   past the TTL (measured 2026-09-14: 15 minutes, no restarts), because the
   relay accepts TURN Refresh with the original credential; expiry only
   gates new allocations.
-- TURN error 486 (Allocation Quota Reached) means a relay refused a new
-  allocation. The exact quota is NOT yet established: it is most likely
-  per credential (per anonymous TURN username), which several credentials
-  from one call link can each fill, so one link can carry well beyond a
-  single credential's worth (users of csqtt/wdtt report ~60 connections on
-  one link). A single dirty run on 2026-09-14 saw 486 after about 20
-  concurrent allocations on one link, but that run followed a series of
-  earlier tests whose still-live allocations were counting too, so the
-  number is unreliable; a clean measurement is still to be done. The pool
-  keeps 10 workers per credential slot; a 486 on a credential that had
-  already allocated marks that slot saturated and the worker moves on. A
-  486 on a fresh credential is treated conservatively as the link being
-  full and freezes further fetches for that link for 10 minutes (this is a
-  guard against a captcha storm, and may be relaxed once the quota is
-  measured). 401 or a stale nonce invalidates the slot and re-fetches.
+- VK's quota is per credential (per anonymous TURN username): about 20
+  allocations, then the relay answers TURN error 486 (Allocation Quota
+  Reached). Measured clean on 2026-09-14: three credentials from ONE call
+  link gave 20 + 20 + 20 = 60 live allocations, each hitting 486 on its
+  21st. The call link itself is not limited. The pool keeps ConnsPerSlot
+  workers per credential slot; a 486 saturates that slot and the worker
+  moves to a fresh slot, which mints another credential (captcha-free via
+  api.vk.me). 401 or a stale nonce invalidates the slot and re-fetches.
 - Fetches are serialised by a mutex and spaced by a random 3 to 6 s cooldown
   (VK rate-limits the chain). A captcha puts the pool into a 60 s cooldown
   during which no fetch is attempted.
 - Slot `s` (workers `10s .. 10s+9`) fetches from call link `s mod len(links)`,
   so several call links spread the participants across calls.
 
-One credential is one anonymous participant in the call. 20 connections are
-2 credentials, so the call shows 2 extra anonymous participants, not 20.
-The hard maximum of 60 connections is 6 participants; whether they fit on
-one link or need several depends on the per-credential vs per-link quota
-question above.
+One credential is one anonymous participant in the call, good for about 20
+allocations. So the participant count is roughly connections / 20 (2 for
+30 connections, 3 for the 60-connection maximum), and one call link is
+enough for all of them.
 
 ## 3. Relay (`relay`)
 

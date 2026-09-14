@@ -75,7 +75,6 @@ func (w *worker) once(ctx context.Context) (reached bool, err error) {
 		p.o.Creds.Failed(lease, err)
 		return false, err
 	}
-	p.o.Creds.Confirm(lease)
 	defer p.o.Creds.Release(lease)
 	defer alloc.Close()
 

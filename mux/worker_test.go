@@ -41,7 +41,6 @@ type staticCreds struct{ cred provider.Credential }
 func (s staticCreds) Acquire(_ context.Context, worker int) (*credpool.Lease, error) {
 	return &credpool.Lease{Cred: s.cred, Index: worker}, nil
 }
-func (staticCreds) Confirm(*credpool.Lease)       {}
 func (staticCreds) Release(*credpool.Lease)       {}
 func (staticCreds) Failed(*credpool.Lease, error) {}
 

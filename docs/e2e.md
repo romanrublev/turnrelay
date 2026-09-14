@@ -147,9 +147,10 @@ Either way, do not bring `wg-vk.conf` up yet.
   -server <vps-ip>:56004 -n 20 -mode srtp -stats 10s
 ```
 
-One call link may carry many connections (users of csqtt/wdtt report ~60);
-the exact VK quota is not yet pinned down (see docs/protocol.md). If you hit
-TURN error 486, add a second `-link` from another call or lower `-n`. VK's captcha is solved automatically
+One call link carries all connections: VK's quota is ~20 allocations per
+credential (not per link), and the pool mints a fresh credential per
+credential slot, so 60 connections work from a single link (measured
+2026-09-14). VK's captcha is solved automatically
 (`-captcha auto`, the default); a solve shows up in the log as
 `vk: captcha solved, retrying getAnonymousToken`.
 
@@ -257,15 +258,11 @@ address(es) seen in the `via <relay>` log lines.
   and wait for `CaptchaUntil` to pass before trying again or ramping back up.
   Do not hammer retries; that extends the cooldown.
 
-- **`credpool: link ... is at VK's allocation quota` / TURN error 486 in
-  the logs:** the pool saw a relay refuse a fresh credential's first
-  allocation and, conservatively, stopped fetching for that link for 10
-  minutes. The real quota is not yet measured (it is probably per credential,
-  which more `-link`s or more credentials work around); add a second
-  `-link <call link of another call>` or lower `-n`. Note that after a
-  network flap the old allocations keep counting on the relay until they
-  expire (10 minutes), so a restart right after one can see 486 that is not
-  a real ceiling.
+- **TURN error 486 (Allocation Quota Reached):** normal past ~20
+  allocations on one credential; the pool just moves the worker to a fresh
+  credential slot. Persistent 486 across all slots after a restart means
+  the previous run's allocations are still counting on the relay (they
+  expire after 10 minutes); wait and retry.
 
 - **Upload is far below download:** the uplink is striped over N
   allocations with different latencies and arrives reordered; TCP inside

@@ -5,7 +5,6 @@ package credpool
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math/rand/v2"
 	"sync"
@@ -25,15 +24,9 @@ type Options struct {
 	CooldownMin     time.Duration
 	CooldownMax     time.Duration
 	CaptchaCooldown time.Duration
-	// LinkQuotaCooldown is how long a call link is left alone after a 486
-	// on a credential that never allocated anything: VK's quota is about
-	// 20 allocations per link, so a fresh credential refused outright
-	// means the link is full, and minting more credentials (each one a
-	// captcha) cannot help until old allocations expire.
-	LinkQuotaCooldown time.Duration
-	Now               func() time.Time
-	Sleep             func(context.Context, time.Duration) error
-	Logf              func(string, ...any)
+	Now             func() time.Time
+	Sleep           func(context.Context, time.Duration) error
+	Logf            func(string, ...any)
 }
 
 func (o *Options) defaults() {
@@ -61,9 +54,6 @@ func (o *Options) defaults() {
 	}
 	if o.CaptchaCooldown == 0 {
 		o.CaptchaCooldown = time.Minute
-	}
-	if o.LinkQuotaCooldown == 0 {
-		o.LinkQuotaCooldown = 10 * time.Minute
 	}
 	if o.Now == nil {
 		o.Now = time.Now
@@ -105,41 +95,30 @@ type slot struct {
 }
 
 type Stats struct {
-	Slots          int
-	Active         int
-	LastError      string
-	CaptchaUntil   time.Time
-	LinksExhausted int
+	Slots        int
+	Active       int
+	LastError    string
+	CaptchaUntil time.Time
 }
-
-// ErrLinkQuota is returned when every call link is at VK's allocation quota
-// and no slot has spare capacity; workers back off and retry later.
-var ErrLinkQuota = errors.New("credpool: call link at VK allocation quota")
 
 type Pool struct {
 	fetch Fetcher
 	o     Options
 
-	mu            sync.Mutex
-	slots         map[int]*slot
-	fetchMu       sync.Mutex // one fetch at a time
-	lastFetch     time.Time
-	captcha       time.Time
-	lastErr       error
-	linkExhausted map[string]time.Time // link -> until
+	mu        sync.Mutex
+	slots     map[int]*slot
+	fetchMu   sync.Mutex // one fetch at a time
+	lastFetch time.Time
+	captcha   time.Time
+	lastErr   error
 }
 
 func New(f Fetcher, o Options) *Pool {
 	o.defaults()
-	return &Pool{fetch: f, o: o, slots: map[int]*slot{}, linkExhausted: map[string]time.Time{}}
+	return &Pool{fetch: f, o: o, slots: map[int]*slot{}}
 }
 
 func (p *Pool) linkFor(s int) string { return p.o.Links[s%len(p.o.Links)] }
-
-// linkOpen reports whether link may be fetched for. p.mu must be held.
-func (p *Pool) linkOpen(link string) bool {
-	return p.o.Now().After(p.linkExhausted[link])
-}
 
 // shortLink is what the log gets to see of a call link hash: enough to tell
 // links apart, not enough to join the call from a log line.
@@ -238,7 +217,6 @@ func (p *Pool) fetchInto(ctx context.Context, id int) error {
 		p.mu.Unlock()
 		return fmt.Errorf("credpool: captcha cooldown until %s: %w", until.Format(time.Kitchen), &provider.CaptchaRequiredError{})
 	}
-	skippedClosed := 0
 	for {
 		s := p.slots[id]
 		if p.usable(s) { // someone already fetched a slot we can use while we waited for fetchMu
@@ -246,21 +224,10 @@ func (p *Pool) fetchInto(ctx context.Context, id int) error {
 			return nil
 		}
 		if s == nil || !s.valid || p.expired(s) {
-			if p.linkOpen(p.linkFor(id)) {
-				break // id is free to (re)fetch into: absent, invalidated, or expired
-			}
-			// This id's link is at quota; try the next id, whose link may
-			// differ. Once every link has been seen closed, give up.
-			skippedClosed++
-			if skippedClosed >= len(p.o.Links) {
-				until := p.linkExhausted[p.linkFor(id)]
-				p.mu.Unlock()
-				return fmt.Errorf("credpool: no fetch until %s: %w", until.Format(time.Kitchen), ErrLinkQuota)
-			}
+			break // id is free to (re)fetch into: absent, invalidated, or expired
 		}
-		// s exists, is valid and unexpired: it is either saturated or
-		// simply full (still holding live leases). Either way it must not
-		// be overwritten, so try the next id.
+		// s exists, is valid and unexpired: saturated or simply full. It
+		// must not be overwritten, so try the next id.
 		id++
 	}
 	p.mu.Unlock()
@@ -294,17 +261,6 @@ func (p *Pool) fetchInto(ctx context.Context, id int) error {
 	return nil
 }
 
-// Confirm records that an allocation succeeded with l's credential, so a
-// later 486 on it is the credential's own quota rather than the link's.
-func (p *Pool) Confirm(l *Lease) {
-	if l == nil || l.s == nil {
-		return
-	}
-	p.mu.Lock()
-	l.s.confirmed = true
-	p.mu.Unlock()
-}
-
 func (p *Pool) Release(l *Lease) {
 	if l == nil || l.s == nil {
 		return
@@ -322,14 +278,13 @@ func (p *Pool) Failed(l *Lease, err error) {
 	p.mu.Lock()
 	switch {
 	case relay.IsQuotaError(err):
+		// VK's quota is per credential (per anonymous TURN username): ~20
+		// allocations, measured 2026-09-14. A 486 means this credential is
+		// full, so the worker moves to a fresh slot which fetches another
+		// credential; the call link itself is not limited (60 allocations
+		// on one link via 3 credentials confirmed).
 		l.s.saturated = true
-		if l.s.valid && !l.s.confirmed {
-			until := p.o.Now().Add(p.o.LinkQuotaCooldown)
-			p.linkExhausted[l.s.cred.Link] = until
-			p.o.Logf("credpool: link %s is at VK's allocation quota (486 on a fresh credential); no new credentials for it until %s", shortLink(l.s.cred.Link), until.Format(time.Kitchen))
-		} else {
-			p.o.Logf("credpool: slot %d saturated (486)", l.Slot)
-		}
+		p.o.Logf("credpool: slot %d saturated (credential at its ~20 allocation quota)", l.Slot)
 	case relay.IsAuthError(err):
 		l.s.valid = false
 		p.o.Logf("credpool: slot %d invalidated (%v)", l.Slot, err)
@@ -345,11 +300,6 @@ func (p *Pool) Stats() Stats {
 	st := Stats{Slots: len(p.slots), CaptchaUntil: p.captcha}
 	for _, s := range p.slots {
 		st.Active += len(s.active)
-	}
-	for _, until := range p.linkExhausted {
-		if p.o.Now().Before(until) {
-			st.LinksExhausted++
-		}
 	}
 	if p.lastErr != nil {
 		st.LastError = p.lastErr.Error()

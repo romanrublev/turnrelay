@@ -14,7 +14,6 @@ import (
 
 type Acquirer interface {
 	Acquire(ctx context.Context, worker int) (*credpool.Lease, error)
-	Confirm(*credpool.Lease)
 	Release(*credpool.Lease)
 	Failed(*credpool.Lease, error)
 }

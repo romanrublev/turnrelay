@@ -2,7 +2,6 @@ package credpool
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -50,7 +49,6 @@ func TestQuotaMovesWorkerToAnotherSlot(t *testing.T) {
 	}
 	p := New(f, opts())
 	l0, _ := p.Acquire(context.Background(), 0)
-	p.Confirm(l0) // the credential worked once, so a 486 saturates the slot, not the link
 	p.Failed(l0, quotaErr())
 	l0b, err := p.Acquire(context.Background(), 0)
 	if err != nil || l0b.Slot == 0 {
@@ -390,81 +388,5 @@ func TestRefreshLogTruncatesLink(t *testing.T) {
 	}
 	if shortLink("static") != "static" || shortLink("abc") != "abc" {
 		t.Fatal("short links must stay intact")
-	}
-}
-
-// A 486 on a credential that never allocated anything means the call link
-// itself is at VK's quota (about 20 allocations per link, not per
-// credential): the pool must stop fetching for that link instead of minting
-// credential after credential (each one a captcha).
-func TestFreshQuotaExhaustsLink(t *testing.T) {
-	var n atomic.Int32
-	f := func(_ context.Context, link string) (provider.Credential, error) {
-		n.Add(1)
-		return provider.Credential{Username: link + "-u", Relays: []string{"r"}, Link: link}, nil
-	}
-	o := opts()
-	o.Links = []string{"L1"}
-	p := New(f, o)
-	l0, _ := p.Acquire(context.Background(), 0)
-	p.Failed(l0, quotaErr())
-	_, err := p.Acquire(context.Background(), 0)
-	if !errors.Is(err, ErrLinkQuota) {
-		t.Fatalf("want ErrLinkQuota, got %v", err)
-	}
-	if n.Load() != 1 {
-		t.Fatalf("pool minted %d credentials after the link hit its quota", n.Load())
-	}
-	if p.Stats().LinksExhausted != 1 {
-		t.Fatalf("stats %+v", p.Stats())
-	}
-}
-
-func TestFreshQuotaOnOneLinkStillFetchesTheOther(t *testing.T) {
-	var fetched []string
-	f := func(_ context.Context, link string) (provider.Credential, error) {
-		fetched = append(fetched, link)
-		return provider.Credential{Username: link + "-u", Relays: []string{"r"}, Link: link}, nil
-	}
-	o := opts() // Links L1, L2; ConnsPerSlot 2
-	p := New(f, o)
-	l0, _ := p.Acquire(context.Background(), 0)   // slot 0 -> L1
-	p.Failed(l0, quotaErr())                      // L1 exhausted
-	l2, err := p.Acquire(context.Background(), 2) // slot 1 -> L2
-	if err != nil || l2.Cred.Link != "L2" {
-		t.Fatalf("worker 2: %+v %v", l2, err)
-	}
-	l1, err := p.Acquire(context.Background(), 1) // own slot 0 is on the exhausted link: borrow from L2
-	if err != nil || l1.Cred.Link != "L2" {
-		t.Fatalf("worker 1 should borrow from L2: %+v %v", l1, err)
-	}
-	// Slot 1 is full; worker 3 may mint another credential, but only for
-	// the link that is not at quota.
-	l3, err := p.Acquire(context.Background(), 3)
-	if err != nil || l3.Cred.Link != "L2" {
-		t.Fatalf("worker 3: %+v %v", l3, err)
-	}
-	if strings.Join(fetched, ",") != "L1,L2,L2" {
-		t.Fatalf("fetch sequence %v", fetched)
-	}
-}
-
-func TestConfirmedQuotaMovesWorkerNotLink(t *testing.T) {
-	f := func(_ context.Context, link string) (provider.Credential, error) {
-		return provider.Credential{Username: link, Relays: []string{"r"}, Link: link}, nil
-	}
-	o := opts()
-	o.Links = []string{"L1"}
-	p := New(f, o)
-	l0, _ := p.Acquire(context.Background(), 0)
-	p.Confirm(l0) // this credential did allocate: a later 486 is credential quota, not link quota
-	l1, _ := p.Acquire(context.Background(), 1)
-	p.Failed(l1, quotaErr())
-	l1b, err := p.Acquire(context.Background(), 1)
-	if err != nil || l1b.Slot == 0 {
-		t.Fatalf("worker 1 should get a fresh slot: %+v %v", l1b, err)
-	}
-	if p.Stats().LinksExhausted != 0 {
-		t.Fatal("a confirmed credential's 486 must not exhaust the link")
 	}
 }
