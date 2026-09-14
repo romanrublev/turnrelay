@@ -133,7 +133,7 @@ func (p *Pool) Close() {
 			p.cancel()
 		}
 		close(p.closed)
-		p.readyCond.Broadcast()
+		p.broadcastReady()
 		p.wg.Wait()
 	})
 }
@@ -162,9 +162,17 @@ func (p *Pool) Read(ctx context.Context) ([]byte, error) {
 	}
 }
 
+// broadcastReady wakes WaitReady. It takes readyMu so a broadcast cannot
+// land between WaitReady's condition check and its Wait and be lost.
+func (p *Pool) broadcastReady() {
+	p.readyMu.Lock()
+	p.readyCond.Broadcast()
+	p.readyMu.Unlock()
+}
+
 // WaitReady blocks until at least n workers are active.
 func (p *Pool) WaitReady(ctx context.Context, n int) error {
-	stop := context.AfterFunc(ctx, p.readyCond.Broadcast)
+	stop := context.AfterFunc(ctx, p.broadcastReady)
 	defer stop()
 	p.readyMu.Lock()
 	defer p.readyMu.Unlock()

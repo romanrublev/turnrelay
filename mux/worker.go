@@ -85,10 +85,7 @@ func (w *worker) once(ctx context.Context) (err error) {
 		return err
 	}
 	p.active.Add(1)
-	// Broadcast under readyMu so WaitReady's check-then-Wait cannot miss it.
-	p.readyMu.Lock()
-	p.readyCond.Broadcast()
-	p.readyMu.Unlock()
+	p.broadcastReady()
 	defer p.active.Add(-1)
 	p.o.Logf("mux: worker %d up via %s relayed %s", w.id, server, alloc.RelayedAddr())
 
