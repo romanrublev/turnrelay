@@ -101,6 +101,11 @@ func (w *worker) once(ctx context.Context) (reached bool, err error) {
 	if _, err := conn.Write(EncodeHello(p.session)); err != nil {
 		return false, err
 	}
+	if p.authTag != nil {
+		if _, err := conn.Write(EncodeAuth(p.authTag)); err != nil {
+			return false, err
+		}
+	}
 	reached = true
 	p.active.Add(1)
 	p.broadcastReady()

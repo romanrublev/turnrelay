@@ -174,6 +174,7 @@ func New(cfg Config) (*Dialer, error) {
 	d.pool = mux.New(mux.Options{
 		Workers: cfg.Connections, Peer: d.peer, Wrapper: wrapper, Creds: d.creds,
 		TURNUDP: udp, TURNOverride: override, Logf: cfg.Logf, DialContext: cfg.DialContext,
+		Password: cfg.Password,
 	})
 	return d, nil
 }
