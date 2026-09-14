@@ -133,3 +133,9 @@ func (r *racingResolver) DialContext(ctx context.Context, network, address strin
 	}
 	return nil, errors.New("vk: dial " + host + ": " + strings.TrimPrefix(lastErr.Error(), "dial "))
 }
+
+// ExportedResolverDial exposes the shared racing resolver's dialer for
+// diagnostics.
+func ExportedResolverDial() func(ctx context.Context, network, address string) (net.Conn, error) {
+	return defaultResolver.DialContext
+}

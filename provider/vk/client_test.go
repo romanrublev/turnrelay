@@ -32,7 +32,7 @@ func (f *fakeDoer) Do(r *fhttp.Request) (*fhttp.Response, error) {
 	if r.Body != nil {
 		body, _ = io.ReadAll(r.Body)
 	}
-	f.calls = append(f.calls, r.URL.Host+r.URL.Path+"?"+string(body))
+	f.calls = append(f.calls, r.URL.Host+r.URL.Path+"?"+string(body)+"&"+r.URL.RawQuery)
 	key := r.URL.Host + r.URL.Path
 	if r.Method == "GET" {
 		if f.getHeaders == nil {
@@ -45,9 +45,10 @@ func (f *fakeDoer) Do(r *fhttp.Request) (*fhttp.Response, error) {
 		}
 		f.postHeaders[key] = r.Header.Clone()
 	}
-	if strings.Contains(string(body), "method=vchat.joinConversationByLink") {
+	q := string(body) + "&" + r.URL.RawQuery
+	if strings.Contains(q, "method=vchat.joinConversationByLink") {
 		key += "#join"
-	} else if strings.Contains(string(body), "method=auth.anonymLogin") {
+	} else if strings.Contains(q, "method=auth.anonymLogin") {
 		key += "#login"
 	}
 	var b string
@@ -69,6 +70,7 @@ func (f *fakeDoer) Do(r *fhttp.Request) (*fhttp.Response, error) {
 }
 
 func newTestClient(d Doer) *Client {
+	// Legacy-path tests by default; VK Calls tests flip TryVKCalls on.
 	return &Client{HTTP: d, Endpoints: DefaultEndpoints, Sleep: func(time.Duration) {}, Logf: func(string, ...any) {}}
 }
 
@@ -246,9 +248,14 @@ func TestNewClientWithDialer(t *testing.T) {
 	if len(dialed) == 0 {
 		t.Fatal("dialer never called")
 	}
+	// The VK Calls path is tried first, so the first dial is api.vk.me;
+	// every dial must go through the injected dialer to a VK host on 443.
+	if dialed[0] != "tcp api.vk.me:443" {
+		t.Fatalf("first dial %q, want tcp api.vk.me:443", dialed[0])
+	}
 	for _, d := range dialed {
-		if d != "tcp login.vk.ru:443" {
-			t.Fatalf("dialed %q, want %q", d, "tcp login.vk.ru:443")
+		if !strings.HasSuffix(d, ":443") {
+			t.Fatalf("dialed %q, want a VK host on :443", d)
 		}
 	}
 	if _, err := NewClientWithDialer(nil); err != nil {

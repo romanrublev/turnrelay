@@ -7,7 +7,9 @@ This project reuses ideas and, where noted in file headers, code from:
 
 - cacggghp/vk-turn-proxy (GPL-3.0): VK credential chain, TURN allocation flow.
 - anton48/vk-turn-proxy-ios (GPL-3.0; pkg/proxy/srtpwrap is MIT): DTLS-SRTP framing,
-  credential pool policy, group hello and probe-echo control frames.
+  credential pool policy, group hello and probe-echo control frames, the
+  captcha-free api.vk.me anonymous-join flow and the proof-of-work captcha
+  solver.
 - amurcanov/proxy-turn-vk-android (GPL-3.0): WDTT-WRAP-v1 envelope.
 
 No code from amurcanov/csqtt (PolyForm Noncommercial 1.0.0) is used.

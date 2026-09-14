@@ -55,14 +55,21 @@ const (
 )
 
 type Client struct {
-	HTTP      Doer
-	Endpoints Endpoints
-	Sleep     func(time.Duration)
-	Logf      func(string, ...any)
+	HTTP Doer
+	// VKCallsHTTP is a separate client with a Safari iOS TLS fingerprint,
+	// used for the api.vk.me path (which rejects a Chrome fingerprint). Nil
+	// falls back to HTTP (tests inject one Doer for both).
+	VKCallsHTTP Doer
+	Endpoints   Endpoints
+	Sleep       func(time.Duration)
+	Logf        func(string, ...any)
 	// AutoCaptcha solves VK's proof-of-work captcha in place (see
 	// captcha_pow.go) up to CaptchaAttempts times before giving up.
 	AutoCaptcha     bool
 	CaptchaAttempts int
+	// TryVKCalls uses the captcha-free api.vk.me path (vkcalls.go) before
+	// the legacy chain. Default on.
+	TryVKCalls bool
 }
 
 const defaultCaptchaAttempts = 2
@@ -96,7 +103,16 @@ func NewClientWithDialer(dial func(ctx context.Context, network, address string)
 	if err != nil {
 		return nil, fmt.Errorf("vk: http client: %w", err)
 	}
-	return &Client{HTTP: hc, Endpoints: DefaultEndpoints, Sleep: time.Sleep, Logf: func(string, ...any) {}, AutoCaptcha: true, CaptchaAttempts: defaultCaptchaAttempts}, nil
+	iosOpts := []tlsclient.HttpClientOption{
+		tlsclient.WithTimeoutSeconds(20),
+		tlsclient.WithClientProfile(profiles.Safari_IOS_18_0),
+		tlsclient.WithDialContext(dial),
+	}
+	ios, err := tlsclient.NewHttpClient(tlsclient.NewNoopLogger(), iosOpts...)
+	if err != nil {
+		return nil, fmt.Errorf("vk: ios http client: %w", err)
+	}
+	return &Client{HTTP: hc, VKCallsHTTP: ios, Endpoints: DefaultEndpoints, Sleep: time.Sleep, Logf: func(string, ...any) {}, AutoCaptcha: true, CaptchaAttempts: defaultCaptchaAttempts, TryVKCalls: true}, nil
 }
 
 func (c *Client) post(ctx context.Context, url, form string) (map[string]any, error) {
@@ -131,18 +147,71 @@ func (c *Client) postWith(ctx context.Context, url, form, origin string, adjust 
 		return nil, err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return nil, fmt.Errorf("vk: %s: http %d", req.URL.Host+req.URL.Path, resp.StatusCode)
+	return decodeJSONReq(req, resp, bodyBytes)
+}
+
+// decodeJSON reads and JSON-decodes a response body, rejecting non-2xx.
+func decodeJSON(resp *fhttp.Response) (map[string]any, error) {
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	return decodeBody(resp.Request, resp.StatusCode, b)
+}
+
+func decodeJSONReq(req *fhttp.Request, resp *fhttp.Response, b []byte) (map[string]any, error) {
+	return decodeBody(req, resp.StatusCode, b)
+}
+
+func decodeBody(req *fhttp.Request, status int, b []byte) (map[string]any, error) {
+	host := "vk"
+	if req != nil && req.URL != nil {
+		host = req.URL.Host + req.URL.Path
+	}
+	if status < 200 || status > 299 {
+		return nil, fmt.Errorf("vk: %s: http %d", host, status)
 	}
 	var m map[string]any
-	if err := json.Unmarshal(body, &m); err != nil {
-		return nil, fmt.Errorf("vk: %s: bad json: %w", req.URL.Host+req.URL.Path, err)
+	if err := json.Unmarshal(b, &m); err != nil {
+		return nil, fmt.Errorf("vk: %s: bad json: %w", host, err)
 	}
 	return m, nil
+}
+
+// vkErr turns a VK "error" object into an error (captcha -> CaptchaRequiredError).
+func vkErr(r map[string]any) error {
+	if eo, ok := r["error"].(map[string]any); ok {
+		return vkAPIError(eo)
+	}
+	return nil
+}
+
+// turnCredFromJoin parses turn_server from a vchat.joinConversationByLink
+// response, keeping only UDP turn:/turns: relays.
+func turnCredFromJoin(link string, r map[string]any) (Credential, error) {
+	ts, _ := r["turn_server"].(map[string]any)
+	cred := Credential{Username: str(ts["username"]), Password: str(ts["credential"]), Link: link, FetchedAt: time.Now()}
+	urls, _ := ts["urls"].([]any)
+	for _, u := range urls {
+		s := str(u)
+		if !strings.HasPrefix(s, "turn:") && !strings.HasPrefix(s, "turns:") {
+			continue
+		}
+		if strings.Contains(s, "transport=tcp") {
+			continue
+		}
+		s = strings.TrimPrefix(strings.TrimPrefix(strings.SplitN(s, "?", 2)[0], "turn:"), "turns:")
+		cred.Relays = append(cred.Relays, s)
+	}
+	if cred.Username == "" || cred.Password == "" || len(cred.Relays) == 0 {
+		return Credential{}, fmt.Errorf("vk: vchat.joinConversationByLink: incomplete turn_server (keys: %s; turn_server keys: %s; %d usable of %d urls)",
+			strings.Join(keys(r), ","), strings.Join(keys(ts), ","), len(cred.Relays), len(urls))
+	}
+	return cred, nil
 }
 
 // missing describes a response that lacks the field a hop needs. Only the
@@ -165,6 +234,13 @@ func keys(m map[string]any) []string {
 // Fetch runs the anonymous-join chain for one call link hash. It tries each
 // known VK app id; a captcha aborts immediately.
 func (c *Client) Fetch(ctx context.Context, link string) (Credential, error) {
+	if c.TryVKCalls {
+		if cred, err := c.fetchViaVKCalls(ctx, link); err == nil {
+			return cred, nil
+		} else {
+			c.Logf("vk: vkcalls path failed (%v); falling back to legacy", err)
+		}
+	}
 	var last error
 	for _, a := range apps {
 		cred, err := c.fetchWith(ctx, link, a)
@@ -261,23 +337,5 @@ func (c *Client) fetchWith(ctx context.Context, link string, a app) (Credential,
 	if err != nil {
 		return Credential{}, err
 	}
-	ts, _ := r["turn_server"].(map[string]any)
-	cred := Credential{Username: str(ts["username"]), Password: str(ts["credential"]), Link: link, FetchedAt: time.Now()}
-	urls, _ := ts["urls"].([]any)
-	for _, u := range urls {
-		s := str(u)
-		if !strings.HasPrefix(s, "turn:") && !strings.HasPrefix(s, "turns:") {
-			continue
-		}
-		if strings.Contains(s, "transport=tcp") {
-			continue
-		}
-		s = strings.TrimPrefix(strings.TrimPrefix(strings.SplitN(s, "?", 2)[0], "turn:"), "turns:")
-		cred.Relays = append(cred.Relays, s)
-	}
-	if cred.Username == "" || cred.Password == "" || len(cred.Relays) == 0 {
-		return Credential{}, fmt.Errorf("vk: vchat.joinConversationByLink: incomplete turn_server (keys: %s; turn_server keys: %s; %d usable of %d urls)",
-			strings.Join(keys(r), ","), strings.Join(keys(ts), ","), len(cred.Relays), len(urls))
-	}
-	return cred, nil
+	return turnCredFromJoin(link, r)
 }
