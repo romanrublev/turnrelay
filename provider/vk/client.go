@@ -194,7 +194,7 @@ func (c *Client) fetchWith(ctx context.Context, link string, a app) (Credential,
 	}
 	token1Esc := neturl.QueryEscape(token1)
 	c.Sleep(120 * time.Millisecond)
-	joinURL := neturl.QueryEscape("https://vk.com/call/join/" + link)
+	joinURL := neturl.QueryEscape("https://vk.ru/call/join/" + link)
 	// 2. preview (best effort, mirrors the web client)
 	_, _ = c.post(ctx, e.API+"calls.getCallPreview?v=5.275&client_id="+a.id, "vk_join_link="+joinURL+"&fields=photo_200&access_token="+token1Esc)
 	c.Sleep(300 * time.Millisecond)

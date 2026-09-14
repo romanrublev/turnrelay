@@ -101,7 +101,7 @@ func TestFetchHappyPath(t *testing.T) {
 		}
 	}
 	tok2 := d.calls[2]
-	if !strings.Contains(tok2, "vk_join_link="+url.QueryEscape("https://vk.com/call/join/AbCdEf123456")) {
+	if !strings.Contains(tok2, "vk_join_link="+url.QueryEscape("https://vk.ru/call/join/AbCdEf123456")) {
 		t.Fatalf("token2 request: %s", tok2)
 	}
 }
