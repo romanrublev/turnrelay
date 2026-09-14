@@ -64,6 +64,7 @@ func (c *Client) Close() error {
 		if c.ks != nil {
 			_ = c.ks.Close()
 		}
+		c.ks, c.sess = nil, nil
 		c.mu.Unlock()
 		_ = c.demux.Close()
 	})
@@ -71,10 +72,17 @@ func (c *Client) Close() error {
 }
 
 // session returns the live smux session, (re)establishing KCP and smux when
-// there is none or the previous one died.
+// there is none or the previous one died. It fails fast once the client is
+// closed, instead of standing up an orphaned session that Close will never
+// tear down.
 func (c *Client) session() (*smux.Session, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	select {
+	case <-c.closed:
+		return nil, net.ErrClosed
+	default:
+	}
 	if c.sess != nil && !c.sess.IsClosed() {
 		return c.sess, nil
 	}

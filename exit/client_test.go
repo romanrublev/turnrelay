@@ -2,6 +2,7 @@ package exit
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"sync"
@@ -53,6 +54,28 @@ func TestClientDialTCP(t *testing.T) {
 	wg.Wait()
 	if _, err := c.DialContext(ctx, "udp", M.SocksaddrFromNet(echo)); err != ErrNetwork {
 		t.Fatalf("udp via DialContext: %v", err)
+	}
+}
+
+// TestClientSessionAfterCloseErrors guards against session() standing up an
+// orphaned KCP/smux pair after Close: once closed, DialContext must fail
+// fast with net.ErrClosed instead of creating a session nothing will ever
+// tear down.
+func TestClientSessionAfterCloseErrors(t *testing.T) {
+	echo := tcpEcho(t)
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := startServer(t, ServerOptions{AllowPrivate: true})
+	c := NewClient(pc, server, ClientOptions{Logf: t.Logf})
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := c.DialContext(ctx, "tcp", M.SocksaddrFromNet(echo)); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("DialContext after Close: got %v, want net.ErrClosed", err)
 	}
 }
 
