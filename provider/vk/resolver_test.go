@@ -35,6 +35,11 @@ func TestRacingResolverFirstAnswerWins(t *testing.T) {
 	if time.Since(start) > time.Second {
 		t.Fatal("waited for the slow resolver")
 	}
+	// The winner returns before the other goroutines have necessarily
+	// recorded their call; give them a moment.
+	for deadline := time.Now().Add(time.Second); calls.Load() != 3 && time.Now().Before(deadline); {
+		time.Sleep(5 * time.Millisecond)
+	}
 	if calls.Load() != 3 {
 		t.Fatalf("all resolvers must be asked in parallel, got %d calls", calls.Load())
 	}

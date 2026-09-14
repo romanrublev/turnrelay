@@ -105,25 +105,50 @@ Captcha. Hop 3 answers with an `error` object instead of `response`:
 `provider.CaptchaRequiredError{Sid, Img, RedirectURI, SessionToken}` where
 `SessionToken` is the `session_token` query parameter of `redirect_uri`
 (`captcha_sid` may arrive as a string or a number). Any other `error_code` is
-a plain error. The library never solves captchas.
+a plain error.
+
+Captcha (measured live 2026-09-14): the error carries a `redirect_uri` on
+`id.vk.ru/not_robot_captcha` whose page embeds an obfuscated proof-of-work
+script. The provider solves it in place: parse the IIFE arguments
+`}("<input>", <difficulty>, "pow_timeout"))` (input, hex-zero prefix length,
+never the obfuscated identifiers), sha256(input + nonce) until the prefix
+matches, wrap the result as `v2.` + base64 of
+`{"hash","nonce","duration_ms","telemetry":{},"tel_hash":""}` (the page's
+own success-branch shape; the legacy three-field shape is answered when the
+page has no `tel_hash`), then call `captchaNotRobot.initSession` (with the
+page's `window.vk.lang`), `.settings`, `.componentDone` (random 32-hex
+browser_fp, a fixed 1920x1080 desktop device JSON), wait 2 to 3 s, `.check`
+(hash, the `window.vk` UUID as `debug_info`) and `.endSession`. These calls
+carry `Origin: https://id.vk.ru` and Chrome's HTTP/2 header order, which VK
+fingerprints. On `status: OK` the `success_token` is sent back on
+`calls.getAnonymousToken` together with `captcha_sid`, `captcha_ts`,
+`captcha_attempt`. When `check` refuses (status BOT, `show_captcha_type`
+slider or image) the captcha error is surfaced unchanged; slider and image
+challenges are not solved.
 
 Lifetime and quota (`credpool`):
 
 - A credential is treated as valid for 10 minutes minus a 60 s safety
   margin from the moment it was fetched; after that the slot is re-fetched.
-- VK allows 10 allocations per credential. The 11th Allocate is answered with
-  TURN error 486 (Allocation Quota Reached); the pool marks that slot
-  saturated and the worker retries with another slot. 401 or a stale nonce
-  invalidates the slot and triggers a re-fetch.
+- VK's allocation quota is about 20 allocations per call link (measured
+  2026-09-14: the 21st Allocate on a link is answered with TURN error 486
+  whichever credential it uses). The pool keeps 10 workers per credential
+  slot; a 486 on a credential that had already allocated marks that slot
+  saturated and the worker moves to another slot, while a 486 on a fresh
+  credential means the link itself is full: the link is frozen for 10
+  minutes (no further credential fetches, hence no further captchas) and
+  the surplus workers wait. 30 connections therefore need two call links.
+  401 or a stale nonce invalidates the slot and triggers a re-fetch.
 - Fetches are serialised by a mutex and spaced by a random 3 to 6 s cooldown
   (VK rate-limits the chain). A captcha puts the pool into a 60 s cooldown
   during which no fetch is attempted.
 - Slot `s` (workers `10s .. 10s+9`) fetches from call link `s mod len(links)`,
   so several call links spread the participants across calls.
 
-One credential is one anonymous participant in the call. 30 connections are
-therefore 3 credentials, and the call shows 3 extra anonymous participants,
-not 30. The hard maximum of 60 connections is 6 participants.
+One credential is one anonymous participant in the call. 20 connections on
+one link are 2 credentials, so the call shows 2 extra anonymous
+participants, not 20. The hard maximum of 60 connections is 6 participants
+across at least 3 links.
 
 ## 3. Relay (`relay`)
 

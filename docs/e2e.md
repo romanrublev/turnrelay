@@ -121,7 +121,9 @@ Find `<physical-gateway>` and `<physical-iface>` with
 `ip route show default` before bringing the tunnel up. `155.212.192.0/20` is
 the relay range documented by the upstream project for call traffic
 (cacggghp/vk-turn-proxy README, <https://github.com/cacggghp/vk-turn-proxy>);
-it is not something this project measured independently. Confirm the relay
+on 2026-09-14 our own runs were handed relays in `193.203.43.0/24`
+(`193.203.43.18:19302`, `193.203.43.30:19302`) instead, so exclude both
+ranges or, better, whatever the log shows. Confirm the relay
 address(es) your run actually used by checking the `turnrelay-udp` log for
 `via <relay>` (see step 3) and adjust the excluded range if a session lands
 outside it.
@@ -142,8 +144,14 @@ Either way, do not bring `wg-vk.conf` up yet.
 
 ```
 ./turnrelay-udp -listen 127.0.0.1:9000 -provider vk -link <call link> \
-  -server <vps-ip>:56004 -n 30 -mode srtp -stats 10s
+  -server <vps-ip>:56004 -n 20 -mode srtp -stats 10s
 ```
+
+VK allows about 20 allocations per call link (measured 2026-09-14), so
+`-n 20` is the ceiling for one link; for 30 connections pass two `-link`
+values from two different calls. VK's captcha is solved automatically
+(`-captcha auto`, the default); a solve shows up in the log as
+`vk: captcha solved, retrying getAnonymousToken`.
 
 Wait for readiness. Each allocation logs a line like:
 
@@ -220,11 +228,24 @@ address(es) seen in the `via <relay>` log lines.
   and wait for `CaptchaUntil` to pass before trying again or ramping back up.
   Do not hammer retries; that extends the cooldown.
 
-- **TURN allocation fails with error 486 in the logs:** too many allocations
-  requested against a single call link/credential (VK caps at 10 per
-  credential, i.e. per participant). Add a second `-link <other participant's
-  call link>` so the load is split across more than one credential, or lower
-  `-n`.
+- **`credpool: link ... is at VK's allocation quota` / TURN error 486 in
+  the logs:** the call link has about 20 allocations in use (VK's per-link
+  cap). The pool stops fetching credentials for that link for 10 minutes and
+  the surplus workers wait. Add a second `-link <call link of another call>`
+  to go beyond 20, or lower `-n`. After a network flap the old allocations
+  on the relay keep counting until they expire (10 minutes), so a restart
+  right after one may see 486 for a while.
+
+- **Upload is far below download:** the uplink is striped over N
+  allocations with different latencies and arrives reordered; TCP inside
+  the tunnel reads that as loss. Run the server with `-uplink-reseq 100ms`
+  (the setup script does since 2026-09-14): measured 0.4 to 3.3 Mbit/s on
+  10 connections.
+
+- **Docker on the VPS:** Docker sets the `FORWARD` chain policy to DROP, so
+  WireGuard clients handshake but get no traffic. The setup script adds
+  `FORWARD` accept rules for `wg0` in `PostUp`; on a server set up before
+  2026-09-14 add them by hand (see `scripts/vps-setup.sh`).
 
 - **WireGuard handshake never completes (`wg show` shows no recent
   handshake):** check `-server <vps-ip>:56004` matches the proxy port

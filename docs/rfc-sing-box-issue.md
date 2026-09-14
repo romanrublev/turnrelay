@@ -75,7 +75,7 @@ anton48/vk-turn-proxy server (`-srtp`) in front of WireGuard.
 | Option | Type | Meaning |
 |---|---|---|
 | `provider` | `vk` \| `static` | credential source, default `vk` |
-| `call_link` / `call_links` | string(s) | VK call link(s); one credential (anonymous participant) per 10 connections |
+| `call_link` / `call_links` | string(s) | VK call link(s); one credential (anonymous participant) per 10 connections, about 20 connections per link |
 | `turn_server` | host:port | `static`: the relay; `vk`: optional override |
 | `turn_username`, `turn_password` | string | `static` only |
 | `server`, `server_port` | address, port | the VPS running the server |

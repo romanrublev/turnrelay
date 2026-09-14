@@ -104,6 +104,8 @@ cat >/etc/wireguard/wg0.conf <<EOC
 Address = 10.8.0.1/24
 ListenPort = $WGPORT
 PrivateKey = $(cat server.key)
+PostUp = iptables -I FORWARD 1 -i wg0 -j ACCEPT; iptables -I FORWARD 1 -o wg0 -j ACCEPT
+PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -D FORWARD -o wg0 -j ACCEPT
 PostUp = iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -o $IFACE -j MASQUERADE
 PostDown = iptables -t nat -D POSTROUTING -s 10.8.0.0/24 -o $IFACE -j MASQUERADE
 # Keep the WireGuard port itself off the public internet: only the anton48
@@ -129,7 +131,7 @@ After=network.target wg-quick@wg0.service
 Requires=wg-quick@wg0.service
 
 [Service]
-ExecStart=/opt/turnrelay/server -listen 0.0.0.0:$PXPORT -connect 127.0.0.1:$WGPORT -srtp
+ExecStart=/opt/turnrelay/server -listen 0.0.0.0:$PXPORT -connect 127.0.0.1:$WGPORT -srtp -uplink-reseq 100ms
 Restart=always
 RestartSec=5
 
