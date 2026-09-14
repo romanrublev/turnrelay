@@ -105,8 +105,8 @@ func (s *sideConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 	return len(b), nil
 }
 
-func (s *sideConn) Close() error                       { return s.d.Close() }
-func (s *sideConn) LocalAddr() net.Addr                { return s.d.pc.LocalAddr() }
-func (s *sideConn) SetDeadline(t time.Time) error      { s.dl.Set(t); return nil }
-func (s *sideConn) SetReadDeadline(t time.Time) error  { s.dl.Set(t); return nil }
-func (s *sideConn) SetWriteDeadline(time.Time) error   { return nil }
+func (s *sideConn) Close() error                      { return s.d.Close() }
+func (s *sideConn) LocalAddr() net.Addr               { return s.d.pc.LocalAddr() }
+func (s *sideConn) SetDeadline(t time.Time) error     { s.dl.Set(t); return nil }
+func (s *sideConn) SetReadDeadline(t time.Time) error { s.dl.Set(t); return nil }
+func (s *sideConn) SetWriteDeadline(time.Time) error  { return nil }

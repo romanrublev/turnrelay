@@ -107,9 +107,6 @@ func dialHook(ctx context.Context, options option.DialerOptions) (func(context.C
 // Start starts the credential and worker pools once the box reaches the start
 // stage. The wireguard endpoint depends on this outbound (via detour), so
 // sing-box starts it first and the pool is filling before the endpoint binds.
-// Start starts the credential and worker pools once the box reaches the start
-// stage. The wireguard endpoint depends on this outbound (via detour), so
-// sing-box starts it first and the pool is filling before the endpoint binds.
 // In exit mode it also opens the datagram pipe to the exit server and wraps
 // it in an exit.Client.
 func (o *Outbound) Start(stage adapter.StartStage) error {

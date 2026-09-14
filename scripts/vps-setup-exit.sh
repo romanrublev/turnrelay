@@ -11,14 +11,29 @@ set -euo pipefail
 PORT="${PORT:-56004}"
 MODE="${MODE:-srtp}"
 PASSWORD="${PASSWORD:?set PASSWORD to the pre-shared password}"
-GO_VERSION="${GO_VERSION:-1.27.0}"
 REPO="${REPO:-https://github.com/romanrublev/turnrelay.git}"
+
+# --- pinned Go version and checksums, keep in sync with scripts/vps-setup.sh -
+GO_VERSION="${GO_VERSION:-1.27.1}"
+GO_SHA256_AMD64=63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445
+GO_SHA256_ARM64=3450b45a3f9ee8568792736a5c5e70a1f2e9b36c35a8f74958c03e51d7d92bec
+# -------------------------------------------------------------------------
 
 apt-get update
 apt-get install -y git curl ca-certificates
 
 if ! command -v go >/dev/null || ! go version | grep -q "go${GO_VERSION}"; then
-  curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-$(dpkg --print-architecture).tar.gz" -o /tmp/go.tgz
+  case "$(uname -m)" in
+  x86_64) GOARCH=amd64; GOSHA=$GO_SHA256_AMD64 ;;
+  aarch64) GOARCH=arm64; GOSHA=$GO_SHA256_ARM64 ;;
+  *)
+    echo "unsupported arch: $(uname -m)" >&2
+    exit 1
+    ;;
+  esac
+  TARBALL="go${GO_VERSION}.linux-${GOARCH}.tar.gz"
+  curl -fsSL "https://go.dev/dl/${TARBALL}" -o /tmp/go.tgz
+  echo "${GOSHA}  /tmp/go.tgz" | sha256sum -c -
   rm -rf /usr/local/go && tar -C /usr/local -xzf /tmp/go.tgz
 fi
 export PATH="/usr/local/go/bin:$PATH"
