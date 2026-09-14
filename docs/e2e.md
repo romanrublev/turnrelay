@@ -147,9 +147,9 @@ Either way, do not bring `wg-vk.conf` up yet.
   -server <vps-ip>:56004 -n 20 -mode srtp -stats 10s
 ```
 
-VK allows about 20 allocations per call link (measured 2026-09-14), so
-`-n 20` is the ceiling for one link; for 30 connections pass two `-link`
-values from two different calls. VK's captcha is solved automatically
+One call link may carry many connections (users of csqtt/wdtt report ~60);
+the exact VK quota is not yet pinned down (see docs/protocol.md). If you hit
+TURN error 486, add a second `-link` from another call or lower `-n`. VK's captcha is solved automatically
 (`-captcha auto`, the default); a solve shows up in the log as
 `vk: captcha solved, retrying getAnonymousToken`.
 
@@ -258,12 +258,14 @@ address(es) seen in the `via <relay>` log lines.
   Do not hammer retries; that extends the cooldown.
 
 - **`credpool: link ... is at VK's allocation quota` / TURN error 486 in
-  the logs:** the call link has about 20 allocations in use (VK's per-link
-  cap). The pool stops fetching credentials for that link for 10 minutes and
-  the surplus workers wait. Add a second `-link <call link of another call>`
-  to go beyond 20, or lower `-n`. After a network flap the old allocations
-  on the relay keep counting until they expire (10 minutes), so a restart
-  right after one may see 486 for a while.
+  the logs:** the pool saw a relay refuse a fresh credential's first
+  allocation and, conservatively, stopped fetching for that link for 10
+  minutes. The real quota is not yet measured (it is probably per credential,
+  which more `-link`s or more credentials work around); add a second
+  `-link <call link of another call>` or lower `-n`. Note that after a
+  network flap the old allocations keep counting on the relay until they
+  expire (10 minutes), so a restart right after one can see 486 that is not
+  a real ceiling.
 
 - **Upload is far below download:** the uplink is striped over N
   allocations with different latencies and arrives reordered; TCP inside

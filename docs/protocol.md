@@ -134,25 +134,32 @@ Lifetime and quota (`credpool`):
   past the TTL (measured 2026-09-14: 15 minutes, no restarts), because the
   relay accepts TURN Refresh with the original credential; expiry only
   gates new allocations.
-- VK's allocation quota is about 20 allocations per call link (measured
-  2026-09-14: the 21st Allocate on a link is answered with TURN error 486
-  whichever credential it uses). The pool keeps 10 workers per credential
-  slot; a 486 on a credential that had already allocated marks that slot
-  saturated and the worker moves to another slot, while a 486 on a fresh
-  credential means the link itself is full: the link is frozen for 10
-  minutes (no further credential fetches, hence no further captchas) and
-  the surplus workers wait. 30 connections therefore need two call links.
-  401 or a stale nonce invalidates the slot and triggers a re-fetch.
+- TURN error 486 (Allocation Quota Reached) means a relay refused a new
+  allocation. The exact quota is NOT yet established: it is most likely
+  per credential (per anonymous TURN username), which several credentials
+  from one call link can each fill, so one link can carry well beyond a
+  single credential's worth (users of csqtt/wdtt report ~60 connections on
+  one link). A single dirty run on 2026-09-14 saw 486 after about 20
+  concurrent allocations on one link, but that run followed a series of
+  earlier tests whose still-live allocations were counting too, so the
+  number is unreliable; a clean measurement is still to be done. The pool
+  keeps 10 workers per credential slot; a 486 on a credential that had
+  already allocated marks that slot saturated and the worker moves on. A
+  486 on a fresh credential is treated conservatively as the link being
+  full and freezes further fetches for that link for 10 minutes (this is a
+  guard against a captcha storm, and may be relaxed once the quota is
+  measured). 401 or a stale nonce invalidates the slot and re-fetches.
 - Fetches are serialised by a mutex and spaced by a random 3 to 6 s cooldown
   (VK rate-limits the chain). A captcha puts the pool into a 60 s cooldown
   during which no fetch is attempted.
 - Slot `s` (workers `10s .. 10s+9`) fetches from call link `s mod len(links)`,
   so several call links spread the participants across calls.
 
-One credential is one anonymous participant in the call. 20 connections on
-one link are 2 credentials, so the call shows 2 extra anonymous
-participants, not 20. The hard maximum of 60 connections is 6 participants
-across at least 3 links.
+One credential is one anonymous participant in the call. 20 connections are
+2 credentials, so the call shows 2 extra anonymous participants, not 20.
+The hard maximum of 60 connections is 6 participants; whether they fit on
+one link or need several depends on the per-credential vs per-link quota
+question above.
 
 ## 3. Relay (`relay`)
 
