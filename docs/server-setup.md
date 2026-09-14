@@ -1,5 +1,8 @@
 # Server and client setup
 
+[English](server-setup.md) | [Русский](server-setup.ru.md)
+
+
 How to stand up the exit VPS and connect to it, both with a plain WireGuard
 client and with sing-box.
 

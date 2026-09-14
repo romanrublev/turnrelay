@@ -1,5 +1,8 @@
 # Roadmap
 
+[English](ROADMAP.md) | [Русский](ROADMAP.ru.md)
+
+
 `turnrelay` is in beta. This is where it is and where it is going. Order and
 scope may change.
 

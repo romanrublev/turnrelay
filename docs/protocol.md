@@ -1,5 +1,8 @@
 # turnrelay wire protocol
 
+[English](protocol.md) | [Русский (README)](../README.ru.md)
+
+
 Describes what the `turnrelay` library
 (`github.com/romanrublev/turnrelay`) puts on the wire, hop by hop, so a
 server implementer or a reviewer can check it against a packet capture.

@@ -1,5 +1,8 @@
 # Contributing
 
+[English](CONTRIBUTING.md) | [Русский](CONTRIBUTING.ru.md)
+
+
 turnrelay is in beta and contributions are welcome.
 
 ## Ground rules

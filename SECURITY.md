@@ -1,5 +1,8 @@
 # Security and safety
 
+[English](SECURITY.md) | [Русский](SECURITY.ru.md)
+
+
 ## Threat model
 
 turnrelay disguises tunnelled traffic as WebRTC media so a network's traffic

@@ -1,5 +1,8 @@
 # turnrelay
 
+[English](README.md) | [Русский](README.ru.md)
+
+
 Tunnel arbitrary UDP traffic through WebRTC TURN relays, disguised as call
 media, and route it with sing-box.
 
