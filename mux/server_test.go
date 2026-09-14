@@ -209,6 +209,12 @@ func TestServerConcurrentJoinLeave(t *testing.T) {
 // conn.Read/conn.Write at the moment ctx is cancelled: without forcing the
 // conn's deadline on cancel, that goroutine never reaches errCh and Handle
 // (and its deferred conn.Close) never returns.
+//
+// To actually reproduce that deadlock, both goroutines must be parked in
+// blocking I/O, not merely idling in a select: the client never writes
+// another frame (so the uplink goroutine sits inside conn.Read), and the
+// client never reads a queued downlink datagram (so, since net.Pipe is
+// unbuffered, the downlink goroutine sits inside conn.Write).
 func TestServerHandleReturnsOnContextCancel(t *testing.T) {
 	s := mux.NewServer(mux.ServerOptions{Password: "pw"})
 	defer s.Close()
@@ -225,18 +231,31 @@ func TestServerHandleReturnsOnContextCancel(t *testing.T) {
 	if _, err := client.Write(mux.EncodeAuth(mux.AuthTag("pw", sess))); err != nil {
 		t.Fatal(err)
 	}
-	// Drain the client side so a downlink write from Handle never blocks
-	// on an unread pipe while we wait to cancel.
-	go func() {
-		buf := make([]byte, 65535)
-		for {
-			if _, err := client.Read(buf); err != nil {
-				return
-			}
+
+	// Queue downlink datagrams that nobody on the client side ever reads.
+	// join() runs in the Handle goroutine right after the auth write above
+	// unblocks, so WriteTo can briefly race it; retry until the session is
+	// visible. net.Pipe is unbuffered, so a single unread datagram is
+	// enough to park the downlink goroutine inside conn.Write; queue two to
+	// be safe.
+	pc := s.PacketConn()
+	writeDeadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := pc.WriteTo([]byte("d1"), mux.SessionAddr(sess)); err == nil {
+			break
 		}
-	}()
-	// Give Handle time to authenticate and settle both goroutines into
-	// their blocking read/select before cancelling.
+		if time.Now().After(writeDeadline) {
+			t.Fatal("session never joined: WriteTo kept failing")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if _, err := pc.WriteTo([]byte("d2"), mux.SessionAddr(sess)); err != nil {
+		t.Fatal(err)
+	}
+
+	// Give the downlink goroutine time to pull the first datagram off the
+	// queue and block inside conn.Write; the uplink goroutine is already
+	// blocked inside conn.Read since the client sent nothing more.
 	time.Sleep(100 * time.Millisecond)
 	cancel()
 	select {
