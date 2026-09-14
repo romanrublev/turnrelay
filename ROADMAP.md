@@ -23,26 +23,22 @@ scope may change.
   so the transport works with sing-box (or any WireGuard client) today.
 - Server side: works with the unmodified upstream relay-side server; a docker
   interop test and a VPS setup script are included.
+- Native sing-box outbound: a `turnrelay` outbound type, shipped as the
+  `github.com/romanrublev/turnrelay/singbox` module, so the config is a single
+  block and no separate `turnrelay-udp` process is needed. GUI clients and
+  custom sing-box builds register it. See `singbox/README.md`.
 
 ## Next
 
-**Native sing-box outbound (the main goal).**
+**Upstream sing-box integration.**
 
-Add a `turnrelay` outbound type to sing-box so the config is a single block
-and no separate `turnrelay-udp` process is needed:
-
-```json
-{ "type": "turnrelay", "tag": "relay", "provider": "vk",
-  "call_link": "https://vk.ru/call/join/<hash>",
-  "server": "<vps-ip>", "server_port": 56004,
-  "connections": 18, "mode": "srtp" }
-```
-
-The `wireguard` endpoint then uses it via `detour`. This is what makes
-turnrelay usable inside sing-box-based clients (including on iOS, where the
-one-VPN limit rules out a second app). An RFC for upstream is drafted in
-[docs/sing-box-rfc.md](docs/sing-box-rfc.md); the outbound also works as an
-external module for clients that register it themselves.
+The outbound ships today as the external `singbox/` module, which already
+gives the single-block config and works inside sing-box-based clients
+(including on iOS, where the one-VPN limit rules out a second app). What is
+still open is whether it also lands in-tree, behind a `with_turnrelay` build
+tag like `with_wireguard`, via an upstream PR to SagerNet/sing-box. An RFC is
+drafted in [docs/sing-box-rfc.md](docs/sing-box-rfc.md); this is a question
+for the sing-box maintainers, not blocking use of the module.
 
 ## Later
 

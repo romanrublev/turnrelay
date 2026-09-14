@@ -146,5 +146,9 @@ UDP-only outbound used as the detour of the `wireguard` endpoint)?
 
 Library and `turnrelay-udp` CLI exist, with an in-process test suite
 (nothing touches VK) and a docker interop test against the unmodified
-upstream server. The sing-box outbound is the next milestone. Repository:
+upstream server. The sing-box outbound also exists now, as the external
+`singbox/` module described above (option (b)): it registers a `turnrelay`
+outbound against the standard sing-box registries with one `RegisterOutbound`
+call, no patch to sing-box required. Option (a), folding it in-tree behind a
+`with_turnrelay` build tag, is the open question for maintainers. Repository:
 https://github.com/romanrublev/turnrelay

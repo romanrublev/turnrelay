@@ -24,26 +24,22 @@
   WireGuard-клиентом).
 - Серверная сторона: работает с немодифицированной upstream-серверной частью;
   включены docker-тест на совместимость и скрипт настройки VPS.
+- Нативный outbound для sing-box: тип outbound `turnrelay`, поставляется как
+  модуль `github.com/romanrublev/turnrelay/singbox`, так что конфиг - один
+  блок и отдельный процесс `turnrelay-udp` не нужен. GUI-клиенты и кастомные
+  сборки sing-box регистрируют его сами. См. `singbox/README.md`.
 
 ## Дальше
 
-**Нативный outbound для sing-box (главная цель).**
+**Интеграция с upstream sing-box.**
 
-Добавить тип outbound `turnrelay` в sing-box, чтобы конфиг был одним блоком и
-отдельный процесс `turnrelay-udp` был не нужен:
-
-```json
-{ "type": "turnrelay", "tag": "relay", "provider": "vk",
-  "call_link": "https://vk.ru/call/join/<hash>",
-  "server": "<vps-ip>", "server_port": 56004,
-  "connections": 18, "mode": "srtp" }
-```
-
-Тогда endpoint `wireguard` использует его через `detour`. Именно это делает
-turnrelay пригодным внутри клиентов на базе sing-box (в том числе на iOS, где
-лимит «один VPN» исключает второе приложение). Черновик предложения для
-upstream - в [docs/sing-box-rfc.md](docs/sing-box-rfc.md); outbound также
-работает как внешний модуль для клиентов, которые регистрируют его сами.
+Outbound уже поставляется как внешний модуль `singbox/`, который даёт конфиг
+одним блоком и работает внутри клиентов на базе sing-box (в том числе на iOS,
+где лимит «один VPN» исключает второе приложение). Открытым остаётся вопрос,
+попадёт ли он ещё и в основной репозиторий, за флагом сборки `with_turnrelay`
+по аналогии с `with_wireguard`, через upstream PR в SagerNet/sing-box.
+Черновик предложения - в [docs/sing-box-rfc.md](docs/sing-box-rfc.md); это
+вопрос к мейнтейнерам sing-box, использование модуля он не блокирует.
 
 ## Позже
 

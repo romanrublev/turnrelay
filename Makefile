@@ -1,4 +1,4 @@
-.PHONY: test vet build integration
+.PHONY: test vet build integration singbox
 test:
 	go test -race -count=1 ./...
 vet:
@@ -9,3 +9,5 @@ build:
 # a real WireGuard. Manual, not part of go test.
 integration:
 	bash test/integration/run.sh
+singbox:
+	cd singbox && go vet ./... && go test -race -count=1 ./...
