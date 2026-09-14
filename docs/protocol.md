@@ -72,7 +72,12 @@ break system DNS first).
 | 5 | `https://calls.okcdn.ru/fb.do` | `joinLink=<hash>`, `isVideo=false`, `protocolVersion=5`, `capabilities=2F7F`, `anonymToken=<token2>`, `method=vchat.joinConversationByLink`, `format=JSON`, `application_key=CGMMEJLGDIHBABABA`, `session_key=<token3>` | `turn_server.username`, `turn_server.credential`, `turn_server.urls[]` |
 
 The client sleeps 120 ms after hop 1, 300 ms after hop 2, 120 ms after hops 3
-and 4. Every dynamic form value is URL-escaped.
+and 4. Every dynamic form value is URL-escaped. A non-2xx HTTP status on any
+hop is an error naming the host, path and status. When a hop's JSON lacks
+the field the chain needs, the error names the hop, the field and the
+top-level keys that were present; response values (tokens, `session_key`,
+`turn_server.username`, `turn_server.credential`) never appear in errors or
+logs, since errors end up in `Stats.LastError`.
 
 From `turn_server.urls[]` only `turn:` and `turns:` entries are kept, entries
 with `transport=tcp` are dropped, and the scheme and query are stripped so

@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	neturl "net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -118,11 +119,31 @@ func (c *Client) post(ctx context.Context, url, form string) (map[string]any, er
 	if err != nil {
 		return nil, err
 	}
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return nil, fmt.Errorf("vk: %s: http %d", req.URL.Host+req.URL.Path, resp.StatusCode)
+	}
 	var m map[string]any
 	if err := json.Unmarshal(body, &m); err != nil {
-		return nil, fmt.Errorf("vk: %s: bad json: %w", url, err)
+		return nil, fmt.Errorf("vk: %s: bad json: %w", req.URL.Host+req.URL.Path, err)
 	}
 	return m, nil
+}
+
+// missing describes a response that lacks the field a hop needs. Only the
+// names of the top-level keys go into the error, never their values: these
+// responses carry tokens and, on the last hop, the TURN username and
+// credential, and the error ends up in Stats.LastError and in logs.
+func missing(hop, field string, r map[string]any) error {
+	return fmt.Errorf("vk: %s: no %s in response (keys: %s)", hop, field, strings.Join(keys(r), ","))
+}
+
+func keys(m map[string]any) []string {
+	ks := make([]string, 0, len(m))
+	for k := range m {
+		ks = append(ks, k)
+	}
+	sort.Strings(ks)
+	return ks
 }
 
 // Fetch runs the anonymous-join chain for one call link hash. It tries each
@@ -153,7 +174,7 @@ func (c *Client) fetchWith(ctx context.Context, link string, a app) (Credential,
 	data, _ := r["data"].(map[string]any)
 	token1 := str(data["access_token"])
 	if token1 == "" {
-		return Credential{}, fmt.Errorf("vk: no access_token in %v", r)
+		return Credential{}, missing("get_anonym_token", "data.access_token", r)
 	}
 	token1Esc := neturl.QueryEscape(token1)
 	c.Sleep(120 * time.Millisecond)
@@ -172,7 +193,7 @@ func (c *Client) fetchWith(ctx context.Context, link string, a app) (Credential,
 	resp, _ := r["response"].(map[string]any)
 	token2 := str(resp["token"])
 	if token2 == "" {
-		return Credential{}, fmt.Errorf("vk: no token in %v", r)
+		return Credential{}, missing("calls.getAnonymousToken", "response.token", r)
 	}
 	token2Esc := neturl.QueryEscape(token2)
 	c.Sleep(120 * time.Millisecond)
@@ -184,7 +205,7 @@ func (c *Client) fetchWith(ctx context.Context, link string, a app) (Credential,
 	}
 	token3 := str(r["session_key"])
 	if token3 == "" {
-		return Credential{}, fmt.Errorf("vk: no session_key in %v", r)
+		return Credential{}, missing("auth.anonymLogin", "session_key", r)
 	}
 	token3Esc := neturl.QueryEscape(token3)
 	c.Sleep(120 * time.Millisecond)
@@ -208,7 +229,8 @@ func (c *Client) fetchWith(ctx context.Context, link string, a app) (Credential,
 		cred.Relays = append(cred.Relays, s)
 	}
 	if cred.Username == "" || cred.Password == "" || len(cred.Relays) == 0 {
-		return Credential{}, fmt.Errorf("vk: incomplete turn_server in %v", r)
+		return Credential{}, fmt.Errorf("vk: vchat.joinConversationByLink: incomplete turn_server (keys: %s; turn_server keys: %s; %d usable of %d urls)",
+			strings.Join(keys(r), ","), strings.Join(keys(ts), ","), len(cred.Relays), len(urls))
 	}
 	return cred, nil
 }

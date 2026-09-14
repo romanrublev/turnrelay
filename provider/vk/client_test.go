@@ -3,6 +3,7 @@ package vk
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/url"
 	"strings"
@@ -15,9 +16,10 @@ import (
 )
 
 type fakeDoer struct {
-	t     *testing.T
-	calls []string
-	resp  map[string]string // url path -> body, consumed in order per path
+	t      *testing.T
+	calls  []string
+	resp   map[string]string // url path -> body, consumed in order per path
+	status map[string]int    // url path -> HTTP status, 200 when absent
 }
 
 func (f *fakeDoer) Do(r *fhttp.Request) (*fhttp.Response, error) {
@@ -33,7 +35,11 @@ func (f *fakeDoer) Do(r *fhttp.Request) (*fhttp.Response, error) {
 	if !ok {
 		f.t.Fatalf("unexpected request %s", key)
 	}
-	return &fhttp.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(b))}, nil
+	code := f.status[key]
+	if code == 0 {
+		code = 200
+	}
+	return &fhttp.Response{StatusCode: code, Body: io.NopCloser(strings.NewReader(b))}, nil
 }
 
 func newTestClient(d Doer) *Client {
@@ -117,5 +123,71 @@ func TestFetchAPIError(t *testing.T) {
 	_, err := newTestClient(d).Fetch(context.Background(), "AbCdEf123456")
 	if err == nil || provider.IsCaptcha(err) || !strings.Contains(err.Error(), "29") {
 		t.Fatalf("got %v", err)
+	}
+}
+
+// TestFetchErrorsNeverCarryResponseValues: a hop-5 answer whose urls are all
+// TCP fails, and the error must not quote the response (it holds the TURN
+// username and credential, and the error lands in Stats.LastError and logs).
+func TestFetchErrorsNeverCarryResponseValues(t *testing.T) {
+	const user, pass, sess = "leak-user-7f3a", "leak-cred-91bc", "leak-session-55d0"
+	d := &fakeDoer{t: t, resp: map[string]string{
+		"login.vk.ru/":                             `{"data":{"access_token":"T1"}}`,
+		"api.vk.ru/method/calls.getCallPreview":    `{"response":{}}`,
+		"api.vk.ru/method/calls.getAnonymousToken": `{"response":{"token":"T2"}}`,
+		"calls.okcdn.ru/fb.do#login":               `{"session_key":"` + sess + `"}`,
+		"calls.okcdn.ru/fb.do#join":                `{"turn_server":{"username":"` + user + `","credential":"` + pass + `","urls":["turn:155.212.200.1:3478?transport=tcp","turn:155.212.200.2:3478?transport=tcp"]},"session_id":"S"}`,
+	}}
+	var logged []string
+	c := newTestClient(d)
+	c.Logf = func(f string, a ...any) { logged = append(logged, fmt.Sprintf(f, a...)) }
+	_, err := c.Fetch(context.Background(), "AbCdEf123456")
+	if err == nil {
+		t.Fatal("tcp-only urls accepted")
+	}
+	text := err.Error() + "\n" + strings.Join(logged, "\n")
+	for _, secret := range []string{user, pass, sess, "T1", "T2"} {
+		if strings.Contains(text, secret) {
+			t.Fatalf("error or log quotes response value %q: %s", secret, text)
+		}
+	}
+	for _, want := range []string{"turn_server", "urls", "0 usable of 2"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error lacks %q: %v", want, err)
+		}
+	}
+}
+
+// TestFetchMissingFieldReportsKeysOnly: a hop-1 body without the token names
+// the keys it did have and nothing else.
+func TestFetchMissingFieldReportsKeysOnly(t *testing.T) {
+	d := &fakeDoer{t: t, resp: map[string]string{
+		"login.vk.ru/": `{"data":{"other":"value-should-not-appear"},"error":"nope"}`,
+	}}
+	_, err := newTestClient(d).Fetch(context.Background(), "AbCdEf123456")
+	if err == nil {
+		t.Fatal("missing access_token accepted")
+	}
+	if strings.Contains(err.Error(), "value-should-not-appear") || strings.Contains(err.Error(), "nope") {
+		t.Fatalf("error quotes response values: %v", err)
+	}
+	if !strings.Contains(err.Error(), "keys: data,error") || !strings.Contains(err.Error(), "data.access_token") {
+		t.Fatalf("error does not name the keys present: %v", err)
+	}
+}
+
+// TestFetchHTTPStatusError: a non-2xx answer is an error naming the status,
+// whatever the body says.
+func TestFetchHTTPStatusError(t *testing.T) {
+	d := &fakeDoer{t: t,
+		resp:   map[string]string{"login.vk.ru/": `{"data":{"access_token":"T1"}}`},
+		status: map[string]int{"login.vk.ru/": 429},
+	}
+	_, err := newTestClient(d).Fetch(context.Background(), "AbCdEf123456")
+	if err == nil || !strings.Contains(err.Error(), "429") {
+		t.Fatalf("want an error naming 429, got %v", err)
+	}
+	if strings.Contains(err.Error(), "T1") {
+		t.Fatalf("error quotes the body: %v", err)
 	}
 }
