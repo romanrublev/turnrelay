@@ -53,6 +53,9 @@ type Options struct {
 	// DialContext is handed to relay.Allocate for every worker's socket to
 	// the relay; nil means the net package. See relay.Options.DialContext.
 	DialContext func(ctx context.Context, network, address string) (net.Conn, error)
+	// Password, when set, makes every worker send an auth frame after its
+	// hello so an exit server can verify the session. Empty sends nothing.
+	Password string
 }
 
 func (o *Options) defaults() {
@@ -101,6 +104,7 @@ type Stats struct {
 type Pool struct {
 	o          Options
 	session    [16]byte
+	authTag    []byte // nil when Options.Password is empty
 	up         chan []byte
 	down       chan []byte
 	handshakes chan struct{}
@@ -122,6 +126,9 @@ func New(o Options) *Pool {
 	p := &Pool{o: o, up: make(chan []byte, o.UplinkQueue), down: make(chan []byte, o.DownlinkQueue),
 		handshakes: make(chan struct{}, o.HandshakeSlots), closed: make(chan struct{})}
 	_, _ = rand.Read(p.session[:])
+	if o.Password != "" {
+		p.authTag = AuthTag(o.Password, p.session)
+	}
 	p.readyCond = sync.NewCond(&p.readyMu)
 	return p
 }

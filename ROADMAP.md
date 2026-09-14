@@ -27,6 +27,12 @@ scope may change.
   `github.com/romanrublev/turnrelay/singbox` module, so the config is a single
   block and no separate `turnrelay-udp` process is needed. GUI clients and
   custom sing-box builds register it. See `singbox/README.md`.
+- Proxy-exit server mode: `turnrelay-server` terminates the transport and
+  dials destinations itself (session-authenticated with a pre-shared
+  password, KCP+smux for TCP, framed datagrams for UDP), so WireGuard is
+  optional. The sing-box outbound gains `server_type: "exit"` (a normal
+  TCP+UDP outbound) and `turnrelay-proxy` is a local SOCKS5 front for any
+  other client.
 
 ## Next
 
@@ -48,8 +54,6 @@ for the sing-box maintainers, not blocking use of the module.
   WebRTC call services with whitelisted relays can be added as providers.
 - **Xray transport.** The same dialer for Xray-core, if maintainers are
   receptive.
-- **Proxy-exit server mode.** A server that forwards arbitrary dialed
-  destinations, so WireGuard is not required in every deployment.
 
 ## Non-goals
 

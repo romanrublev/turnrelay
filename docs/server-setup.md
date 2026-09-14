@@ -189,3 +189,29 @@ restricted network also breaks DNS, point sing-box's DNS through the endpoint
   WireGuard clients handshake but get no traffic. The setup script adds
   `FORWARD` accept rules for `wg0`; add them by hand if your server predates
   that.
+
+## Exit server (no WireGuard)
+
+`turnrelay-server` terminates the transport and dials destinations itself,
+so the VPS needs no WireGuard and the client needs no `wireguard` endpoint.
+It requires a pre-shared password: a server that dials arbitrary
+destinations without one is an open proxy. By default it refuses private,
+loopback and link-local destinations (`-allow-private` to change that).
+
+```bash
+sudo PASSWORD='choose-a-long-random-password' bash scripts/vps-setup-exit.sh
+```
+
+Flags (`turnrelay-server -h`): `-listen` (default `:56004`), `-mode`
+(`srtp` default, `wrap`, `dtls`), `-password` or `TURNRELAY_PASSWORD`,
+`-bind`, `-allow-private`, `-dial-timeout`, `-max-streams`, `-udp-timeout`.
+
+Clients: in sing-box set `"server_type": "exit"` and `"password"` on the
+`turnrelay` outbound and drop the `wireguard` endpoint; the outbound is then a
+normal TCP+UDP proxy outbound. Without sing-box, run a local SOCKS5 proxy:
+
+```bash
+turnrelay-proxy -server <vps-ip>:56004 -password '...' -links https://vk.ru/call/join/<hash>
+```
+
+and point any SOCKS5 client at `127.0.0.1:1080`.

@@ -34,9 +34,36 @@ Options: `provider` (`vk` default, or `static`), `call_link` / `call_links`,
 `turn_server` / `turn_username` / `turn_password` (`static`),
 `server` / `server_port` (the VPS running the relay-side server, an IP),
 `connections` (default 30, max 60), `mode` (`srtp` default, `wrap`, `dtls`),
-`password` (`wrap`), `captcha` (`auto` default, `fail`, `wait`), `udp`
-(default true). `detour` and `bind_interface` on the outbound apply to the
-sockets towards the VK API and the relay.
+`password` (`wrap`, and required for `server_type: "exit"`), `server_type`
+(`wireguard` default, or `exit`), `captcha` (`auto` default, `fail`, `wait`),
+`udp` (default true). `detour` and `bind_interface` on the outbound apply to
+the sockets towards the VK API and the relay.
+
+## Exit mode (no WireGuard)
+
+With a `turnrelay-server` on the VPS (see `docs/server-setup.md`), set
+`server_type` to `exit`: the outbound becomes a normal TCP+UDP proxy outbound
+and no `wireguard` endpoint is needed.
+
+```json
+{
+  "outbounds": [
+    { "type": "turnrelay", "tag": "relay",
+      "server_type": "exit", "password": "<pre-shared password>",
+      "provider": "vk", "call_link": "https://vk.ru/call/join/<hash>",
+      "server": "203.0.113.5", "server_port": 56004,
+      "connections": 30, "mode": "srtp" },
+    { "type": "direct", "tag": "direct" }
+  ],
+  "route": { "rules": [
+      { "rule_set": "geosite-ru", "outbound": "direct" },
+      { "rule_set": "geoip-ru",   "outbound": "direct" } ],
+    "final": "relay" }
+}
+```
+
+`server_type` defaults to `wireguard` (the detour setup above). In `exit`
+mode `password` is required.
 
 ## Building a custom sing-box
 
