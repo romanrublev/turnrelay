@@ -3,6 +3,7 @@ package mux
 import (
 	"context"
 	"errors"
+	"io"
 	"math/rand/v2"
 	"net"
 	"sync/atomic"
@@ -137,10 +138,15 @@ func (w *worker) once(ctx context.Context) (reached bool, err error) {
 
 	// downlink: control frames consumed here, payload to the shared queue
 	go func() {
-		buf := make([]byte, 2048)
+		buf := make([]byte, maxDatagram)
 		for {
 			n, err := conn.Read(buf)
 			if err != nil {
+				// An oversize record truncates against the buffer on some
+				// conns; drop it rather than tearing the worker down.
+				if errors.Is(err, io.ErrShortBuffer) {
+					continue
+				}
 				errCh <- err
 				return
 			}

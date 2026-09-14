@@ -3,6 +3,7 @@ package mux
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -11,6 +12,15 @@ import (
 	"github.com/romanrublev/turnrelay/credpool"
 	"github.com/romanrublev/turnrelay/obfs"
 )
+
+// maxDatagram is the largest UDP payload a single Write may carry. A larger
+// datagram could never leave a relay intact; rejecting it at the door keeps
+// it out of the uplink queue, where a write that always fails would be a
+// poison pill that kills every worker that steals it.
+const maxDatagram = 65535
+
+// ErrDatagramSize is returned by Write for an empty or oversize datagram.
+var ErrDatagramSize = errors.New("mux: datagram size out of range")
 
 type Acquirer interface {
 	Acquire(ctx context.Context, worker int) (*credpool.Lease, error)
@@ -156,6 +166,9 @@ func (p *Pool) Close() {
 // queue slot and the closed signal, so a Write after Close could still
 // "succeed" into a queue nobody drains.
 func (p *Pool) Write(ctx context.Context, b []byte) error {
+	if len(b) == 0 || len(b) > maxDatagram {
+		return ErrDatagramSize
+	}
 	select {
 	case <-p.closed:
 		return net.ErrClosed

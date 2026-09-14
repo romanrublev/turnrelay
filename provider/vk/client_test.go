@@ -262,3 +262,35 @@ func TestNewClientWithDialer(t *testing.T) {
 		t.Fatalf("nil dialer: %v", err)
 	}
 }
+
+// TestRedactURLErrDropsQuery: a network error wrapping a request URL must not
+// carry the query string, where every VK Calls token lives, into the returned
+// error (it lands in Stats.LastError and the logs).
+func TestRedactURLErrDropsQuery(t *testing.T) {
+	inner := errors.New("connection reset by peer")
+	full := "https://api.vk.me/method/auth.getAnonymToken?v=5.276&anonymous_token=SECRETTOKEN&device_id=abc"
+	got := redactURLErr(&url.Error{Op: "Post", URL: full, Err: inner})
+	if strings.Contains(got.Error(), "SECRETTOKEN") || strings.Contains(got.Error(), "auth.getAnonymToken?") {
+		t.Fatalf("redacted error still leaks the query: %v", got)
+	}
+	if !strings.Contains(got.Error(), "api.vk.me") || !strings.Contains(got.Error(), inner.Error()) {
+		t.Fatalf("redacted error dropped host or cause: %v", got)
+	}
+	// A non-URL error passes through untouched.
+	if redactURLErr(inner) != inner {
+		t.Fatal("non-url error should pass through unchanged")
+	}
+}
+
+func TestIsVKHost(t *testing.T) {
+	for _, h := range []string{"vk.com", "vk.ru", "id.vk.ru", "id.vk.com", "login.vk.ru", "VK.RU"} {
+		if !isVKHost(h) {
+			t.Fatalf("%q should be a VK host", h)
+		}
+	}
+	for _, h := range []string{"evil.com", "vk.com.evil.com", "notvk.ru", "vkru", "", "vk.ru.attacker.net"} {
+		if isVKHost(h) {
+			t.Fatalf("%q must not be treated as a VK host", h)
+		}
+	}
+}

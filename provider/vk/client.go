@@ -144,19 +144,24 @@ func (c *Client) postWith(ctx context.Context, url, form, origin string, adjust 
 	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, redactURLErr(err)
 	}
 	defer resp.Body.Close()
-	bodyBytes, err := io.ReadAll(resp.Body)
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxRespBody))
 	if err != nil {
 		return nil, err
 	}
 	return decodeJSONReq(req, resp, bodyBytes)
 }
 
+// maxRespBody caps how much of a VK/OK JSON answer is read: real answers are a
+// few KiB, so 1 MiB bounds memory if a proxy or a hostile relay streams an
+// unbounded body.
+const maxRespBody = 1 << 20
+
 // decodeJSON reads and JSON-decodes a response body, rejecting non-2xx.
 func decodeJSON(resp *fhttp.Response) (map[string]any, error) {
-	b, err := io.ReadAll(resp.Body)
+	b, err := io.ReadAll(io.LimitReader(resp.Body, maxRespBody))
 	if err != nil {
 		return nil, err
 	}
@@ -165,6 +170,25 @@ func decodeJSON(resp *fhttp.Response) (map[string]any, error) {
 
 func decodeJSONReq(req *fhttp.Request, resp *fhttp.Response, b []byte) (map[string]any, error) {
 	return decodeBody(req, resp.StatusCode, b)
+}
+
+// redactURLErr strips the query string and fragment from a *url.Error so a
+// token carried in the request URL (every VK Calls param lives there) never
+// reaches Stats.LastError or the logs. Errors that do not wrap a *url.Error
+// pass through unchanged.
+func redactURLErr(err error) error {
+	var ue *neturl.Error
+	if !errors.As(err, &ue) {
+		return err
+	}
+	if u, perr := neturl.Parse(ue.URL); perr == nil {
+		u.RawQuery = ""
+		u.Fragment = ""
+		ue.URL = u.String()
+	} else {
+		ue.URL = "" // unparseable: drop it rather than risk leaking a token
+	}
+	return err
 }
 
 func decodeBody(req *fhttp.Request, status int, b []byte) (map[string]any, error) {

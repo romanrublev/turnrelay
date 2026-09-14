@@ -52,7 +52,7 @@ func (c *Client) vkCallsGet(ctx context.Context, url string) (map[string]any, er
 		req2.Header = req.Header.Clone()
 		resp, err = doer.Do(req2)
 		if err != nil {
-			return nil, err
+			return nil, redactURLErr(err)
 		}
 	}
 	defer resp.Body.Close()

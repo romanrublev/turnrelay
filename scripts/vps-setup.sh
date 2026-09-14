@@ -112,8 +112,10 @@ PostDown = iptables -t nat -D POSTROUTING -s 10.8.0.0/24 -o $IFACE -j MASQUERADE
 # server, over loopback, ever needs to reach it. A publicly reachable
 # WireGuard port is trivially fingerprintable and would defeat the SRTP
 # disguise, so drop anything for this port that did not arrive on lo.
-PostUp = iptables -A INPUT -p udp --dport $WGPORT ! -i lo -j DROP
+PostUp = iptables -I INPUT 1 -p udp --dport $WGPORT ! -i lo -j DROP
+PostUp = ip6tables -I INPUT 1 -p udp --dport $WGPORT ! -i lo -j DROP
 PostDown = iptables -D INPUT -p udp --dport $WGPORT ! -i lo -j DROP
+PostDown = ip6tables -D INPUT -p udp --dport $WGPORT ! -i lo -j DROP
 [Peer]
 PublicKey = $(cat client.pub)
 AllowedIPs = 10.8.0.2/32
@@ -134,6 +136,23 @@ Requires=wg-quick@wg0.service
 ExecStart=/opt/turnrelay/server -listen 0.0.0.0:$PXPORT -connect 127.0.0.1:$WGPORT -srtp -uplink-reseq 100ms
 Restart=always
 RestartSec=5
+# The server parses DTLS/SRTP from any host on the public proxy port; keep a
+# bug in it from becoming root on the box that holds the WireGuard key.
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+CapabilityBoundingSet=
 
 [Install]
 WantedBy=multi-user.target

@@ -144,3 +144,17 @@ func TestPoolRestartsDeadWorker(t *testing.T) {
 	}
 	t.Fatalf("workers did not recover: %+v", p.Stats())
 }
+
+// TestWriteRejectsBadSize: Write refuses an empty or oversize datagram with
+// ErrDatagramSize so it never enters the uplink queue, where an always-failing
+// write would be a poison pill that kills each worker that steals it.
+func TestWriteRejectsBadSize(t *testing.T) {
+	p := mux.New(mux.Options{Workers: 1})
+	ctx := context.Background()
+	if err := p.Write(ctx, nil); err != mux.ErrDatagramSize {
+		t.Fatalf("empty datagram: got %v, want ErrDatagramSize", err)
+	}
+	if err := p.Write(ctx, make([]byte, 65536)); err != mux.ErrDatagramSize {
+		t.Fatalf("oversize datagram: got %v, want ErrDatagramSize", err)
+	}
+}

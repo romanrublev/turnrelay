@@ -2,6 +2,8 @@ package obfs
 
 import (
 	"context"
+	"errors"
+	"io"
 	"net"
 	"time"
 )
@@ -21,13 +23,18 @@ type WrapPacketConn struct {
 }
 
 func NewWrapPacketConn(inner net.PacketConn, codec *WrapCodec) *WrapPacketConn {
-	return &WrapPacketConn{PacketConn: inner, codec: codec, rbuf: make([]byte, 2048), wbuf: make([]byte, 0, 2048)}
+	return &WrapPacketConn{PacketConn: inner, codec: codec, rbuf: make([]byte, maxDatagram), wbuf: make([]byte, 0, maxDatagram)}
 }
 
 func (w *WrapPacketConn) ReadFrom(b []byte) (int, net.Addr, error) {
 	for {
 		n, addr, err := w.PacketConn.ReadFrom(w.rbuf)
 		if err != nil {
+			// Drop an oversize datagram instead of surfacing a fatal error
+			// to the DTLS layer above (one bad packet must not kill the conn).
+			if errors.Is(err, io.ErrShortBuffer) {
+				continue
+			}
 			return 0, nil, err
 		}
 		if !IsWrapRTP(w.rbuf[:n]) {

@@ -11,6 +11,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"sync"
@@ -25,6 +26,9 @@ import (
 const (
 	srtpPayloadType uint8 = 100
 	srtpProfile           = srtp.ProtectionProfileAes128CmHmacSha1_80
+	// maxDatagram is the largest UDP payload; read buffers are sized to it
+	// so an oversize datagram is never truncated into a fatal error.
+	maxDatagram = 65535
 )
 
 func isDTLSByte(b byte) bool { return b >= 20 && b <= 63 }
@@ -79,7 +83,7 @@ func newDemuxFromChannels(raw net.PacketConn, peer net.Addr, dtlsCh, rtpCh chan 
 }
 
 func (d *demux) loop() {
-	buf := make([]byte, 2048)
+	buf := make([]byte, maxDatagram)
 	for {
 		n, _, err := d.raw.ReadFrom(buf)
 		if err != nil {
@@ -90,6 +94,12 @@ func (d *demux) loop() {
 			}
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
 				_ = d.raw.SetReadDeadline(time.Time{})
+				continue
+			}
+			// An oversize datagram truncates against the buffer on some
+			// PacketConn implementations; drop it rather than tearing the
+			// whole demux down (otherwise one bad packet is a DoS).
+			if errors.Is(err, io.ErrShortBuffer) {
 				continue
 			}
 			d.Close()
@@ -198,7 +208,9 @@ func newSRTPConn(d *demux, dc *dtls.Conn, isClient bool) (*srtpConn, error) {
 	if err != nil {
 		return nil, err
 	}
-	dec, err := srtp.CreateContext(cfg.Keys.RemoteMasterKey, cfg.Keys.RemoteMasterSalt, cfg.Profile)
+	// Replay protection on the receive context: a captured SRTP packet
+	// replayed within the window is dropped (RFC 3711 section 3.3.2).
+	dec, err := srtp.CreateContext(cfg.Keys.RemoteMasterKey, cfg.Keys.RemoteMasterSalt, cfg.Profile, srtp.SRTPReplayProtection(64))
 	if err != nil {
 		return nil, err
 	}

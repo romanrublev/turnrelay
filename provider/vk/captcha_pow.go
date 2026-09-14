@@ -191,6 +191,19 @@ func buildPowResult(env powEnvelope, hexHash string, nonce int, durationMs int64
 	return powPrefix + base64.StdEncoding.EncodeToString([]byte(payload))
 }
 
+// isVKHost reports whether host is vk.com/vk.ru or a subdomain of either. The
+// captcha redirect target is fetched only from these, so an attacker-supplied
+// redirect_uri cannot point the solver at another server.
+func isVKHost(host string) bool {
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	for _, base := range []string{"vk.com", "vk.ru"} {
+		if host == base || strings.HasSuffix(host, "."+base) {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *Client) getPage(ctx context.Context, url string) ([]byte, error) {
 	req, err := fhttp.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
@@ -211,7 +224,7 @@ func (c *Client) getPage(ctx context.Context, url string) ([]byte, error) {
 	h.Set("Priority", "u=0, i")
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, redactURLErr(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
@@ -253,9 +266,16 @@ func (c *Client) solveCaptcha(ctx context.Context, ce *provider.CaptchaRequiredE
 	if ce.SessionToken == "" || ce.RedirectURI == "" {
 		return "", errors.New("vk: captcha error carries no redirect_uri/session_token")
 	}
+	// redirect_uri comes straight from a VK error body, which we do not
+	// control; only ever fetch it from a VK host so a hostile or spoofed
+	// answer cannot redirect the solver at an arbitrary server.
+	ru, err := neturl.Parse(ce.RedirectURI)
+	if err != nil || (ru.Scheme != "https" && ru.Scheme != "http") || !isVKHost(ru.Hostname()) {
+		return "", fmt.Errorf("vk: captcha redirect_uri host not allowed: %q", ce.RedirectURI)
+	}
 	domain := "vk.com"
-	if u, err := neturl.Parse(ce.RedirectURI); err == nil && u.Query().Get("domain") != "" {
-		domain = u.Query().Get("domain")
+	if ru.Query().Get("domain") != "" {
+		domain = ru.Query().Get("domain")
 	}
 	// A browser needs a moment before the page loads.
 	c.Sleep(time.Duration(1500+rand.IntN(1000)) * time.Millisecond)

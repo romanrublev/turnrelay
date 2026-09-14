@@ -84,15 +84,29 @@ func main() {
 	}
 	log.Printf("listening on %s, %d connections via %s (%s)", *listen, *n, *server, *mode)
 
-	var lastPeer atomic.Value // net.Addr
+	// peer is pinned to the first client seen and never reassigned: this is a
+	// single-client local pipe, so honouring a later source address would let
+	// any host that sends one spoofed datagram to the listen port hijack the
+	// downlink and receive the return traffic.
+	var peer atomic.Value // net.Addr
 	go func() {
-		buf := make([]byte, 2048)
+		buf := make([]byte, 65535)
 		for {
 			n, from, err := local.ReadFrom(buf)
 			if err != nil {
 				return
 			}
-			lastPeer.Store(from)
+			if n == 0 {
+				continue
+			}
+			pinned, _ := peer.Load().(net.Addr)
+			if pinned == nil {
+				peer.CompareAndSwap(nil, from)
+				pinned, _ = peer.Load().(net.Addr)
+			}
+			if pinned == nil || from.String() != pinned.String() {
+				continue // not the pinned client
+			}
 			if _, err := pipe.Write(buf[:n]); err != nil {
 				log.Printf("uplink: %v", err)
 				return
@@ -100,13 +114,16 @@ func main() {
 		}
 	}()
 	go func() {
-		buf := make([]byte, 2048)
+		buf := make([]byte, 65535)
 		for {
 			n, err := pipe.Read(buf)
 			if err != nil {
 				return
 			}
-			if to, ok := lastPeer.Load().(net.Addr); ok {
+			if n == 0 {
+				continue
+			}
+			if to, ok := peer.Load().(net.Addr); ok {
 				_, _ = local.WriteTo(buf[:n], to)
 			}
 		}
