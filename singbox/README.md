@@ -48,7 +48,7 @@ package main
 
 import (
 	"context"
-	"os"
+	"log"
 
 	"github.com/sagernet/sing-box"
 	"github.com/sagernet/sing-box/include"
@@ -63,10 +63,13 @@ func main() {
 		include.InboundRegistry(), outboundRegistry, include.EndpointRegistry(),
 		include.DNSTransportRegistry(), include.ServiceRegistry(),
 		include.CertificateProviderRegistry())
-	_ = ctx
-	// Feed ctx to box.New(box.Options{Context: ctx, ...}) and run it as
-	// the sing-box CLI does. See the sing-box cmd/sing-box sources.
-	os.Exit(0)
+	// Feed ctx to box.New and run it as the sing-box CLI does; see the
+	// sing-box cmd/sing-box sources for the full main.
+	instance, err := box.New(box.Options{Context: ctx, Options: parsedOptions})
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Fatal(instance.Start())
 }
 ```
 
