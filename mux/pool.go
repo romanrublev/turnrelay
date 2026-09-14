@@ -18,6 +18,11 @@ type Acquirer interface {
 	Failed(*credpool.Lease, error)
 }
 
+// DefaultUplinkQueue is the uplink queue depth when Options.UplinkQueue is
+// zero: how many datagrams Write accepts while no worker is draining them
+// before it parks.
+const DefaultUplinkQueue = 256
+
 type Options struct {
 	Workers           int
 	Peer              *net.UDPAddr
@@ -57,7 +62,7 @@ func (o *Options) defaults() {
 		o.HandshakeSlots = 3
 	}
 	if o.UplinkQueue == 0 {
-		o.UplinkQueue = 256
+		o.UplinkQueue = DefaultUplinkQueue
 	}
 	if o.DownlinkQueue == 0 {
 		o.DownlinkQueue = 2048
@@ -138,7 +143,24 @@ func (p *Pool) Close() {
 	})
 }
 
+// Write queues one datagram for the next free worker. It blocks while the
+// uplink queue is full and gives up with ctx.Err() when ctx ends, or with
+// net.ErrClosed once the pool is closed. Callers tie ctx to the lifetime of
+// the conn doing the write so closing that conn releases a parked Write.
+//
+// The pool's closed channel is checked before the queue is offered the
+// datagram: a plain three-way select would pick at random between a ready
+// queue slot and the closed signal, so a Write after Close could still
+// "succeed" into a queue nobody drains.
 func (p *Pool) Write(ctx context.Context, b []byte) error {
+	select {
+	case <-p.closed:
+		return net.ErrClosed
+	default:
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	pkt := make([]byte, len(b))
 	copy(pkt, b)
 	select {

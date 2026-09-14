@@ -277,3 +277,98 @@ func TestTwoConnsShareDownlink(t *testing.T) {
 		t.Fatalf("n=%d err=%v", n, err)
 	}
 }
+
+// newStalledDialer builds a Dialer whose credential fetch never returns, so
+// no worker ever comes up and nothing drains the uplink queue. Close still
+// works: the fetcher honours ctx, which Dialer.Close cancels.
+func newStalledDialer(t *testing.T) *turnrelay.Dialer {
+	t.Helper()
+	d, err := turnrelay.New(turnrelay.Config{
+		CallLinks:   []string{"https://vk.ru/call/join/TESTLINK1234"},
+		Server:      netip.MustParseAddrPort("127.0.0.1:56004"),
+		Connections: 1,
+		Fetcher: func(ctx context.Context, _ string) (provider.Credential, error) {
+			<-ctx.Done()
+			return provider.Credential{}, ctx.Err()
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+	return d
+}
+
+// TestWriteReleasedByConnClose: a Write parked on the full uplink queue must
+// return net.ErrClosed when its own conn is closed, not only when the whole
+// Dialer is. wireguard-go closes and re-dials its bind conn on errors; a
+// Write that outlived the conn would leak a goroutine per re-dial.
+func TestWriteReleasedByConnClose(t *testing.T) {
+	d := newStalledDialer(t)
+	c, err := d.DialContext(context.Background(), "udp", M.ParseSocksaddr("127.0.0.1:56004"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	filled := make(chan struct{})
+	parked := make(chan error, 1)
+	go func() {
+		for i := 0; i < mux.DefaultUplinkQueue; i++ {
+			if _, err := c.Write([]byte{1}); err != nil {
+				parked <- err
+				return
+			}
+		}
+		close(filled)
+		_, err := c.Write([]byte{1}) // queue is full and nobody drains it: parks here
+		parked <- err
+	}()
+	select {
+	case <-filled:
+	case err := <-parked:
+		t.Fatalf("write failed while filling the queue: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("filling the queue did not finish")
+	}
+	select {
+	case err := <-parked:
+		t.Fatalf("write did not park on the full queue: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-parked:
+		if !errors.Is(err, net.ErrClosed) {
+			t.Fatalf("parked Write returned %v, want net.ErrClosed", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("parked Write not released by conn Close within 2s")
+	}
+}
+
+// TestWriteAfterDialerClose: once the Dialer is closed, Write must return
+// net.ErrClosed every time, even though the uplink queue has room. The
+// pool used to select at random between the free queue slot and the closed
+// signal, so this failed about half the time.
+func TestWriteAfterDialerClose(t *testing.T) {
+	for i := 0; i < 50; i++ {
+		d := newStalledDialer(t)
+		c, err := d.DialContext(context.Background(), "udp", M.ParseSocksaddr("127.0.0.1:56004"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := d.Close(); err != nil {
+			t.Fatal(err)
+		}
+		for j := 0; j < 4; j++ {
+			if _, err := c.Write([]byte{1}); !errors.Is(err, net.ErrClosed) {
+				t.Fatalf("iteration %d write %d: got %v, want net.ErrClosed", i, j, err)
+			}
+		}
+		_ = c.Close()
+	}
+}

@@ -15,6 +15,8 @@ type datagramConn struct {
 	mu     sync.Mutex
 	rctx   context.Context
 	rstop  context.CancelFunc
+	wctx   context.Context // canceled by Close: releases a Write parked on a full uplink queue
+	wstop  context.CancelFunc
 	closed chan struct{}
 	once   sync.Once
 }
@@ -22,6 +24,7 @@ type datagramConn struct {
 func newDatagramConn(d *Dialer) *datagramConn {
 	c := &datagramConn{d: d, closed: make(chan struct{})}
 	c.rctx, c.rstop = context.WithCancel(context.Background())
+	c.wctx, c.wstop = context.WithCancel(context.Background())
 	return c
 }
 
@@ -59,15 +62,25 @@ func (c *datagramConn) Write(b []byte) (int, error) {
 		return 0, net.ErrClosed
 	default:
 	}
-	if err := c.d.pool.Write(context.Background(), b); err != nil {
+	if err := c.d.pool.Write(c.wctx, b); err != nil {
+		select {
+		case <-c.closed:
+			return 0, net.ErrClosed
+		default:
+		}
 		return 0, err
 	}
 	return len(b), nil
 }
 
+// Close wakes every Read and Write parked on this conn: Reads through the
+// read context, a Write blocked on a full uplink queue through the write
+// context. Both then return net.ErrClosed. Datagrams already queued stay
+// queued; the pool, not the conn, owns them.
 func (c *datagramConn) Close() error {
 	c.once.Do(func() {
 		close(c.closed)
+		c.wstop()
 		c.mu.Lock()
 		c.rstop()
 		c.mu.Unlock()

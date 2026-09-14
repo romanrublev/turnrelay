@@ -313,8 +313,10 @@ WireGuard's own traffic).
   worker's send goroutine takes the next datagram from the queue whenever
   its connection is free (work stealing), so a slow allocation takes fewer
   packets. A full queue blocks the writer (back-pressure); nothing is
-  dropped. A datagram taken by a worker that dies before writing it is put
-  back on the queue.
+  dropped. Closing the conn that is writing, or the Dialer, releases a
+  parked writer with `net.ErrClosed`; after the Dialer is closed every
+  `Write` fails that way. A datagram taken by a worker that dies before
+  writing it is put back on the queue.
 - Downlink: every worker reads its connection and pushes payload datagrams
   into one queue of 2048; reads block, nothing is dropped. All open datagram
   conns obtained from the Dialer read from this queue; the WireGuard bind
