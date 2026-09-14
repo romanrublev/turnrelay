@@ -129,7 +129,11 @@ challenges are not solved.
 Lifetime and quota (`credpool`):
 
 - A credential is treated as valid for 10 minutes minus a 60 s safety
-  margin from the moment it was fetched; after that the slot is re-fetched.
+  margin from the moment it was fetched; after that the slot is re-fetched
+  before the next allocation. Allocations that already exist keep working
+  past the TTL (measured 2026-09-14: 15 minutes, no restarts), because the
+  relay accepts TURN Refresh with the original credential; expiry only
+  gates new allocations.
 - VK's allocation quota is about 20 allocations per call link (measured
   2026-09-14: the 21st Allocate on a link is answered with TURN error 486
   whichever credential it uses). The pool keeps 10 workers per credential

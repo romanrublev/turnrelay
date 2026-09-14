@@ -220,6 +220,35 @@ provider/region, measured throughput (Mbit/s), the `Active`/`Restarts`
 values from the stats line at the end of the test, and the VK relay
 address(es) seen in the `via <relay>` log lines.
 
+## 6. Runs
+
+### 2026-09-14, first live run
+
+- VPS: Debian 13 with Docker, 159.195.54.89 (netcup), server
+  `add-server-srtp-layer` @ 37d6607 with `-srtp -uplink-reseq 100ms`.
+- Client: macOS, `turnrelay-udp -n 20` (one call link; 20 is the per-link
+  quota, see Troubleshooting), tunnel driven by sing-box 1.14 with a
+  `wireguard` endpoint whose peer is `127.0.0.1:9000` and a `mixed` inbound
+  (no root needed; DNS pointed at 8.8.8.8 through the endpoint because the
+  host resolver was filtered). Relays: `193.203.43.18:19302`,
+  `193.203.43.30:19302`.
+- Credentials: VK asked for a captcha on every fetch; the automatic solver
+  passed every time (6 of 6 that day).
+- Exit IP through the tunnel: the VPS address, on every check.
+- Throughput with the relays reached directly (a Happ VPN on the host was
+  told to route the relay ranges and the VPS `direct`): download 24 to 29
+  Mbit/s, upload 12 to 16 Mbit/s on 20 connections; the host's own link
+  measured 21 Mbit/s down at the time, so the tunnel was at the link's
+  ceiling, not its own. With the relays reached through that VPN instead:
+  14.5 down, 8 to 10 up.
+- Stability: `Active:20 Restarts:0` for 15 minutes straight, including the
+  credential expiry at 10 minutes: VK keeps refreshing existing allocations
+  after their credential's TTL has passed, so expiry only affects new
+  allocations and never restarts a working pool. Server-side uplink
+  reordering was 87.6% before and 0.0% after the resequencer, 0 losses.
+- Not met: the 30 Mbit/s criterion, which needs a second call link (30
+  connections) and a faster host link than the one available.
+
 ## Troubleshooting
 
 - **Credential pool reports a captcha (`CaptchaUntil:` set to a future
