@@ -150,5 +150,6 @@ upstream server. The sing-box outbound also exists now, as the external
 `singbox/` module described above (option (b)): it registers a `turnrelay`
 outbound against the standard sing-box registries with one `RegisterOutbound`
 call, no patch to sing-box required. Option (a), folding it in-tree behind a
-`with_turnrelay` build tag, is the open question for maintainers. Repository:
+`with_turnrelay` build tag, is the open question for maintainers, tracked
+upstream in SagerNet/sing-box#4534. Repository:
 https://github.com/romanrublev/turnrelay
