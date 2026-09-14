@@ -69,6 +69,14 @@ type Lease struct {
 	Cred  provider.Credential
 	Slot  int
 	Index int
+
+	// s is the exact slot object this lease was issued against. Release
+	// and Failed always act on it directly rather than looking p.slots[Slot]
+	// back up by number: fetchInto can replace whatever *slot currently
+	// sits at that numeric id (a saturated or invalidated slot is refreshed
+	// in place once it becomes safe to do so), and a stale lease must never
+	// be able to mutate the new occupant of its old id.
+	s *slot
 }
 
 type slot struct {
@@ -104,20 +112,34 @@ func New(f Fetcher, o Options) *Pool {
 
 func (p *Pool) linkFor(s int) string { return p.o.Links[s%len(p.o.Links)] }
 
+// expired reports whether s's credential is older than TTL-Margin. s must
+// be non-nil.
+func (p *Pool) expired(s *slot) bool {
+	return !p.o.Now().Before(s.cred.FetchedAt.Add(p.o.TTL - p.o.Margin))
+}
+
 func (p *Pool) usable(s *slot) bool {
-	return s != nil && s.valid && !s.saturated &&
-		p.o.Now().Before(s.cred.FetchedAt.Add(p.o.TTL-p.o.Margin)) &&
-		len(s.active) < p.o.ConnsPerSlot
+	return s != nil && s.valid && !s.saturated && !p.expired(s) && len(s.active) < p.o.ConnsPerSlot
 }
 
 func (p *Pool) lease(id int, s *slot) *Lease {
 	for i := 0; i < p.o.ConnsPerSlot; i++ {
 		if !s.active[i] {
 			s.active[i] = true
-			return &Lease{Cred: s.cred, Slot: id, Index: i}
+			return &Lease{Cred: s.cred, Slot: id, Index: i, s: s}
 		}
 	}
 	return nil
+}
+
+// borrow returns a lease from any currently usable slot. p.mu must be held.
+func (p *Pool) borrow() (*Lease, bool) {
+	for id, s := range p.slots {
+		if p.usable(s) {
+			return p.lease(id, s), true
+		}
+	}
+	return nil, false
 }
 
 func (p *Pool) Acquire(ctx context.Context, worker int) (*Lease, error) {
@@ -130,28 +152,38 @@ func (p *Pool) Acquire(ctx context.Context, worker int) (*Lease, error) {
 			p.mu.Unlock()
 			return l, nil
 		}
-		// Only borrow spare capacity from another slot when this worker's
-		// own slot exists but has degraded (saturated, invalidated, or
-		// expired): that avoids an unnecessary fetch when another slot
-		// still has room. A worker whose own slot was never established
-		// (map key absent) instead goes straight to fetching its own, so a
-		// freshly-needed slot always gets its own credential and Link
+		captchaActive := p.o.Now().Before(p.captcha)
+		// Borrow spare capacity from another slot when this worker's own
+		// slot exists but has degraded (saturated, invalidated, or
+		// expired), or when a captcha cooldown is blocking new fetches
+		// entirely: either way, another slot with room beats waiting.
+		// A worker whose own slot was never established (map key absent)
+		// and no captcha is active instead goes straight to fetching its
+		// own, so a freshly-needed slot gets its own credential and Link
 		// rotation instead of silently sharing another slot's quota.
-		if ownSlot != nil {
-			for id, s := range p.slots {
-				if p.usable(s) {
-					l := p.lease(id, s)
-					p.mu.Unlock()
-					return l, nil
-				}
+		if ownSlot != nil || captchaActive {
+			if l, ok := p.borrow(); ok {
+				p.mu.Unlock()
+				return l, nil
 			}
 		}
-		if until := p.captcha; p.o.Now().Before(until) {
+		if captchaActive {
+			until := p.captcha
 			p.mu.Unlock()
 			return nil, fmt.Errorf("credpool: captcha cooldown until %s: %w", until.Format(time.Kitchen), &provider.CaptchaRequiredError{})
 		}
 		p.mu.Unlock()
 		if err := p.fetchInto(ctx, own); err != nil {
+			// The fetch itself failed (captcha, quota, network...); before
+			// surfacing that, see whether another slot became usable while
+			// we were trying (e.g. a concurrent fetch on another worker's
+			// slot landed in the meantime).
+			p.mu.Lock()
+			if l, ok := p.borrow(); ok {
+				p.mu.Unlock()
+				return l, nil
+			}
+			p.mu.Unlock()
 			return nil, err
 		}
 	}
@@ -161,14 +193,18 @@ func (p *Pool) fetchInto(ctx context.Context, id int) error {
 	p.fetchMu.Lock()
 	defer p.fetchMu.Unlock()
 	p.mu.Lock()
-	if p.usable(p.slots[id]) { // someone fetched while we waited
-		p.mu.Unlock()
-		return nil
-	}
-	// A saturated slot must not be overwritten (its 486 credential must
-	// stay out of rotation until it expires), so fetch into the lowest
-	// unused id instead of clobbering it.
-	for p.slots[id] != nil && p.slots[id].saturated {
+	for {
+		s := p.slots[id]
+		if p.usable(s) { // someone already fetched a slot we can use while we waited for fetchMu
+			p.mu.Unlock()
+			return nil
+		}
+		if s == nil || !s.valid || p.expired(s) {
+			break // id is free to (re)fetch into: absent, invalidated, or expired
+		}
+		// s exists, is valid and unexpired: it is either saturated or
+		// simply full (still holding live leases). Either way it must not
+		// be overwritten, so try the next id.
 		id++
 	}
 	p.mu.Unlock()
@@ -203,31 +239,27 @@ func (p *Pool) fetchInto(ctx context.Context, id int) error {
 }
 
 func (p *Pool) Release(l *Lease) {
-	if l == nil {
+	if l == nil || l.s == nil {
 		return
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if s := p.slots[l.Slot]; s != nil {
-		delete(s.active, l.Index)
-	}
+	delete(l.s.active, l.Index)
 }
 
 // Failed records why the allocation made with l did not work, then releases it.
 func (p *Pool) Failed(l *Lease, err error) {
-	if l == nil {
+	if l == nil || l.s == nil {
 		return
 	}
 	p.mu.Lock()
-	if s := p.slots[l.Slot]; s != nil {
-		switch {
-		case relay.IsQuotaError(err):
-			s.saturated = true
-			p.o.Logf("credpool: slot %d saturated (486)", l.Slot)
-		case relay.IsAuthError(err):
-			s.valid = false
-			p.o.Logf("credpool: slot %d invalidated (%v)", l.Slot, err)
-		}
+	switch {
+	case relay.IsQuotaError(err):
+		l.s.saturated = true
+		p.o.Logf("credpool: slot %d saturated (486)", l.Slot)
+	case relay.IsAuthError(err):
+		l.s.valid = false
+		p.o.Logf("credpool: slot %d invalidated (%v)", l.Slot, err)
 	}
 	p.lastErr = err
 	p.mu.Unlock()
