@@ -1,0 +1,4 @@
+# WireGuard endpoint: wireguard-tools on top of the Docker VM's kernel module,
+# with wireguard-go as wg-quick's automatic userspace fallback.
+FROM alpine:3.22
+RUN apk add --no-cache wireguard-tools wireguard-go iptables iproute2 bash curl

@@ -1,0 +1,14 @@
+# turnrelay-udp built from the repo root (compose sets context to ../..),
+# plus a real WireGuard client and curl.
+FROM golang:1.27-alpine AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -o /out/turnrelay-udp ./cmd/turnrelay-udp
+
+FROM alpine:3.22
+RUN apk add --no-cache wireguard-tools wireguard-go iptables iproute2 bash curl
+COPY --from=build /out/turnrelay-udp /usr/local/bin/turnrelay-udp
+COPY test/integration/client.sh /usr/local/bin/client.sh
+ENTRYPOINT ["bash", "/usr/local/bin/client.sh"]

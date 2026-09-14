@@ -1,0 +1,81 @@
+# Interop lab: turnrelay-udp -> coturn -> unmodified anton48 SRTP server ->
+# WireGuard server -> http-echo. See README.md.
+services:
+  coturn:
+    image: coturn/coturn:4.6
+    command:
+      - --lt-cred-mech
+      - --user=user:pass
+      - --realm=turnrelay.test
+      - --listening-ip=172.28.0.10
+      - --relay-ip=172.28.0.10
+      - --external-ip=172.28.0.10
+      - --no-tls
+      - --no-dtls
+      - --min-port=49152
+      - --max-port=49200
+      - --no-cli
+      - --log-file=stdout
+    networks:
+      lab:
+        ipv4_address: 172.28.0.10
+
+  vkserver:
+    build:
+      context: .
+      dockerfile: Dockerfile.vkserver
+    command: ["-listen", "0.0.0.0:56004", "-connect", "172.28.0.30:51820", "-srtp"]
+    depends_on:
+      - wgserver
+    networks:
+      lab:
+        ipv4_address: 172.28.0.20
+
+  wgserver:
+    build:
+      context: .
+      dockerfile: Dockerfile.wg
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun
+    sysctls:
+      net.ipv4.ip_forward: 1
+    volumes:
+      - ./wg/server.conf:/etc/wireguard/wg0.conf:ro
+    command: ["bash", "-c", "wg-quick up wg0 && exec sleep infinity"]
+    networks:
+      lab:
+        ipv4_address: 172.28.0.30
+
+  web:
+    image: hashicorp/http-echo
+    command: ["-text=ok-through-relay", "-listen=:5678"]
+    networks:
+      lab:
+        ipv4_address: 172.28.0.40
+
+  client:
+    build:
+      context: ../..
+      dockerfile: test/integration/Dockerfile.client
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun
+    volumes:
+      - ./wg/client.conf:/etc/wireguard/wg0.conf:ro
+    depends_on:
+      - coturn
+      - vkserver
+      - wgserver
+      - web
+    networks:
+      lab:
+        ipv4_address: 172.28.0.50
+
+networks:
+  lab:
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
