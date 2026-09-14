@@ -69,8 +69,29 @@ func TestFetchHappyPath(t *testing.T) {
 		}
 	}
 	tok2 := d.calls[2]
-	if !strings.Contains(tok2, "vk_join_link="+url.QueryEscape("https://vk.com/call/join/AbCdEf123456")) && !strings.Contains(tok2, "vk_join_link=https://vk.com/call/join/AbCdEf123456") {
+	if !strings.Contains(tok2, "vk_join_link="+url.QueryEscape("https://vk.com/call/join/AbCdEf123456")) {
 		t.Fatalf("token2 request: %s", tok2)
+	}
+}
+
+func TestFetchEscapesFormValues(t *testing.T) {
+	d := &fakeDoer{t: t, resp: map[string]string{
+		"login.vk.ru/":                             `{"data":{"access_token":"T1&x=y"}}`,
+		"api.vk.ru/method/calls.getCallPreview":    `{"response":{}}`,
+		"api.vk.ru/method/calls.getAnonymousToken": `{"response":{"token":"T2"}}`,
+		"calls.okcdn.ru/fb.do#login":               `{"session_key":"T3"}`,
+		"calls.okcdn.ru/fb.do#join":                `{"turn_server":{"username":"u1","credential":"p1","urls":["turn:155.212.200.1:3478"]}}`,
+	}}
+	c := newTestClient(d)
+	if _, err := c.Fetch(context.Background(), "AbCdEf123456"); err != nil {
+		t.Fatal(err)
+	}
+	tok2 := d.calls[2]
+	if !strings.Contains(tok2, "access_token=T1%26x%3Dy") {
+		t.Fatalf("access_token not escaped in hop3 body: %s", tok2)
+	}
+	if strings.Contains(tok2, "access_token=T1&x=y") {
+		t.Fatalf("access_token leaked unescaped: %s", tok2)
 	}
 }
 

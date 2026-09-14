@@ -155,13 +155,14 @@ func (c *Client) fetchWith(ctx context.Context, link string, a app) (Credential,
 	if token1 == "" {
 		return Credential{}, fmt.Errorf("vk: no access_token in %v", r)
 	}
+	token1Esc := neturl.QueryEscape(token1)
 	c.Sleep(120 * time.Millisecond)
-	joinURL := "https://vk.com/call/join/" + link
+	joinURL := neturl.QueryEscape("https://vk.com/call/join/" + link)
 	// 2. preview (best effort, mirrors the web client)
-	_, _ = c.post(ctx, e.API+"calls.getCallPreview?v=5.275&client_id="+a.id, "vk_join_link="+joinURL+"&fields=photo_200&access_token="+token1)
+	_, _ = c.post(ctx, e.API+"calls.getCallPreview?v=5.275&client_id="+a.id, "vk_join_link="+joinURL+"&fields=photo_200&access_token="+token1Esc)
 	c.Sleep(300 * time.Millisecond)
 	// 3. anonymous call token; captcha shows up here
-	r, err = c.post(ctx, e.API+"calls.getAnonymousToken?v=5.275&client_id="+a.id, "vk_join_link="+joinURL+"&name="+neturl.QueryEscape(randomName())+"&access_token="+token1)
+	r, err = c.post(ctx, e.API+"calls.getAnonymousToken?v=5.275&client_id="+a.id, "vk_join_link="+joinURL+"&name="+neturl.QueryEscape(randomName())+"&access_token="+token1Esc)
 	if err != nil {
 		return Credential{}, err
 	}
@@ -173,6 +174,7 @@ func (c *Client) fetchWith(ctx context.Context, link string, a app) (Credential,
 	if token2 == "" {
 		return Credential{}, fmt.Errorf("vk: no token in %v", r)
 	}
+	token2Esc := neturl.QueryEscape(token2)
 	c.Sleep(120 * time.Millisecond)
 	// 4. OK calls session
 	session := fmt.Sprintf(`{"version":2,"device_id":"%s","client_version":1.1,"client_type":"SDK_JS"}`, uuid.New())
@@ -184,9 +186,10 @@ func (c *Client) fetchWith(ctx context.Context, link string, a app) (Credential,
 	if token3 == "" {
 		return Credential{}, fmt.Errorf("vk: no session_key in %v", r)
 	}
+	token3Esc := neturl.QueryEscape(token3)
 	c.Sleep(120 * time.Millisecond)
 	// 5. join -> TURN credentials
-	r, err = c.post(ctx, e.OK, "joinLink="+link+"&isVideo=false&protocolVersion=5&capabilities=2F7F&anonymToken="+token2+"&method=vchat.joinConversationByLink&format=JSON&application_key="+okAppKey+"&session_key="+token3)
+	r, err = c.post(ctx, e.OK, "joinLink="+neturl.QueryEscape(link)+"&isVideo=false&protocolVersion=5&capabilities=2F7F&anonymToken="+token2Esc+"&method=vchat.joinConversationByLink&format=JSON&application_key="+okAppKey+"&session_key="+token3Esc)
 	if err != nil {
 		return Credential{}, err
 	}
