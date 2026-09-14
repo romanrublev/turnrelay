@@ -7,7 +7,6 @@ import (
 	"net"
 	"os"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/pion/transport/v4/deadline"
@@ -55,10 +54,14 @@ type serverPacket struct {
 }
 
 type serverSession struct {
-	addr     SessionAddr
-	down     chan []byte
-	live     atomic.Int32
-	lastLive atomic.Int64 // unix nanos when live last dropped to zero
+	addr SessionAddr
+	down chan []byte
+	// live and lastLive are guarded by Server.mu, not atomics: reap() must
+	// observe the live-count-drops-to-zero transition and the lastLive
+	// timestamp it produces as one consistent snapshot, which two
+	// independent atomics cannot guarantee across a preemption.
+	live     int
+	lastLive int64 // unix nanos when live last dropped to zero
 }
 
 // Server is the server-side twin of Pool: it takes allocation conns (one per
@@ -95,14 +98,17 @@ func (s *Server) join(addr SessionAddr) *serverSession {
 		s.sessions[addr] = sess
 		s.o.Logf("mux: session %s opened", addr)
 	}
-	sess.live.Add(1)
+	sess.live++
 	return sess
 }
 
 func (s *Server) leave(sess *serverSession) {
-	if sess.live.Add(-1) == 0 {
-		sess.lastLive.Store(time.Now().UnixNano())
+	s.mu.Lock()
+	sess.live--
+	if sess.live == 0 {
+		sess.lastLive = time.Now().UnixNano()
 	}
+	s.mu.Unlock()
 }
 
 func (s *Server) lookup(addr SessionAddr) *serverSession {
@@ -122,7 +128,7 @@ func (s *Server) reap() {
 		case now := <-t.C:
 			s.mu.Lock()
 			for addr, sess := range s.sessions {
-				if sess.live.Load() == 0 && now.UnixNano()-sess.lastLive.Load() > int64(s.o.ZombieAfter) {
+				if sess.live == 0 && now.UnixNano()-sess.lastLive > int64(s.o.ZombieAfter) {
 					delete(s.sessions, addr)
 					s.o.Logf("mux: session %s reaped", addr)
 				}
@@ -162,6 +168,13 @@ func (s *Server) Handle(ctx context.Context, conn net.Conn) error {
 	defer s.leave(sess)
 	wctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	// The uplink/downlink goroutines below only notice wctx.Done() at their
+	// channel selects, not while blocked inside conn.Read/conn.Write. Force
+	// those syscalls to return on cancel by yanking the conn's deadline, or
+	// a goroutine parked in I/O would never reach errCh and Handle would
+	// block forever, leaking the conn and both goroutines.
+	stop := context.AfterFunc(wctx, func() { _ = conn.SetDeadline(time.Now()) })
+	defer stop()
 	errCh := make(chan error, 2)
 
 	// downlink: steal from the session queue

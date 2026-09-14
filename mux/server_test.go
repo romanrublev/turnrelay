@@ -203,3 +203,45 @@ func TestServerConcurrentJoinLeave(t *testing.T) {
 		t.Fatal("no uplink from concurrent allocations")
 	}
 }
+
+// TestServerHandleReturnsOnContextCancel guards against Handle blocking
+// forever when the uplink or downlink goroutine is parked inside a blocking
+// conn.Read/conn.Write at the moment ctx is cancelled: without forcing the
+// conn's deadline on cancel, that goroutine never reaches errCh and Handle
+// (and its deferred conn.Close) never returns.
+func TestServerHandleReturnsOnContextCancel(t *testing.T) {
+	s := mux.NewServer(mux.ServerOptions{Password: "pw"})
+	defer s.Close()
+	var sess [16]byte
+	copy(sess[:], "session-E-0000000")
+	client, server := net.Pipe()
+	defer client.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- s.Handle(ctx, server) }()
+	if _, err := client.Write(mux.EncodeHello(sess)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Write(mux.EncodeAuth(mux.AuthTag("pw", sess))); err != nil {
+		t.Fatal(err)
+	}
+	// Drain the client side so a downlink write from Handle never blocks
+	// on an unread pipe while we wait to cancel.
+	go func() {
+		buf := make([]byte, 65535)
+		for {
+			if _, err := client.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+	// Give Handle time to authenticate and settle both goroutines into
+	// their blocking read/select before cancelling.
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	select {
+	case <-errCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Handle did not return within 2s of context cancel")
+	}
+}
