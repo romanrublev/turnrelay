@@ -68,7 +68,7 @@ func (w *worker) once(ctx context.Context) (reached bool, err error) {
 	p.connecting.Add(1)
 	alloc, err := relay.Allocate(ctx, relay.Options{
 		Server: server, Username: lease.Cred.Username, Password: lease.Cred.Password,
-		UDP: p.o.TURNUDP, PeerIsIPv6: p.o.Peer.IP.To4() == nil,
+		UDP: p.o.TURNUDP, PeerIsIPv6: p.o.Peer.IP.To4() == nil, DialContext: p.o.DialContext,
 	})
 	if err != nil {
 		p.connecting.Add(-1)

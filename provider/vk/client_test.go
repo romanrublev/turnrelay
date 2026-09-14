@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -189,5 +191,43 @@ func TestFetchHTTPStatusError(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "T1") {
 		t.Fatalf("error quotes the body: %v", err)
+	}
+}
+
+// TestNewClientWithDialer: every VK API connection goes through the given
+// dialer, which sees the unresolved host:port and whose error is what Fetch
+// reports. Nothing reaches the network.
+func TestNewClientWithDialer(t *testing.T) {
+	boom := errors.New("detour down")
+	var mu sync.Mutex
+	var dialed []string
+	c, err := NewClientWithDialer(func(_ context.Context, network, address string) (net.Conn, error) {
+		mu.Lock()
+		dialed = append(dialed, network+" "+address)
+		mu.Unlock()
+		return nil, boom
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Sleep = func(time.Duration) {}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err = c.Fetch(ctx, "AbCdEf123456")
+	if err == nil || !strings.Contains(err.Error(), boom.Error()) {
+		t.Fatalf("want the dialer's error, got %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(dialed) == 0 {
+		t.Fatal("dialer never called")
+	}
+	for _, d := range dialed {
+		if d != "tcp login.vk.ru:443" {
+			t.Fatalf("dialed %q, want %q", d, "tcp login.vk.ru:443")
+		}
+	}
+	if _, err := NewClientWithDialer(nil); err != nil {
+		t.Fatalf("nil dialer: %v", err)
 	}
 }

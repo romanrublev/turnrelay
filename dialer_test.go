@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -370,5 +371,68 @@ func TestWriteAfterDialerClose(t *testing.T) {
 			}
 		}
 		_ = c.Close()
+	}
+}
+
+// TestDialContextHookReachesRelay: Config.DialContext is the socket factory
+// for every worker's connection to the TURN relay (what a sing-box outbound
+// hands in for detour and bind_interface).
+func TestDialContextHookReachesRelay(t *testing.T) {
+	ts := turntest.Start(t)
+	vps := echoVPS(t)
+	var mu sync.Mutex
+	var dialed []string
+	d, err := turnrelay.New(turnrelay.Config{
+		CallLinks:   []string{"https://vk.ru/call/join/TESTLINK1234"},
+		Server:      netip.MustParseAddrPort(vps.Addr().String()),
+		Connections: 2,
+		Logf:        t.Logf,
+		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			mu.Lock()
+			dialed = append(dialed, network+" "+address)
+			mu.Unlock()
+			var nd net.Dialer
+			return nd.DialContext(ctx, network, address)
+		},
+		Fetcher: func(context.Context, string) (provider.Credential, error) {
+			return provider.Credential{Username: ts.Username, Password: ts.Password, Relays: []string{ts.Addr()}, Link: "TESTLINK1234"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	t.Cleanup(func() { _ = d.Close() })
+	if err := d.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.WaitReady(ctx, 2); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	got := append([]string(nil), dialed...)
+	mu.Unlock()
+	if len(got) != 2 {
+		t.Fatalf("DialContext calls = %v, want one per worker", got)
+	}
+	for _, g := range got {
+		if g != "udp "+ts.Addr() {
+			t.Fatalf("DialContext call %q, want %q", g, "udp "+ts.Addr())
+		}
+	}
+	c, err := d.DialContext(ctx, "udp", M.ParseSocksaddr(vps.Addr().String()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if _, err := c.Write([]byte("via-hook")); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 16)
+	_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	n, err := c.Read(buf)
+	if err != nil || string(buf[:n]) != "via-hook" {
+		t.Fatalf("n=%d err=%v", n, err)
 	}
 }

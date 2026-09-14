@@ -80,13 +80,29 @@ func publicResolverDialer() net.Dialer {
 	}}
 }
 
+// NewClient builds the VK API client with the Chrome TLS fingerprint and a
+// dialer that resolves names through public resolvers.
 func NewClient() (*Client, error) {
-	hc, err := tlsclient.NewHttpClient(tlsclient.NewNoopLogger(),
+	return NewClientWithDialer(nil)
+}
+
+// NewClientWithDialer is NewClient with every TCP connection to the VK API
+// opened by dial (network "tcp", address host:port, name unresolved). The
+// public-resolver dialer of NewClient is then not used: resolving the name
+// is dial's job, which is what a sing-box detour or bind_interface dialer
+// expects. A nil dial is NewClient.
+func NewClientWithDialer(dial func(ctx context.Context, network, address string) (net.Conn, error)) (*Client, error) {
+	opts := []tlsclient.HttpClientOption{
 		tlsclient.WithTimeoutSeconds(20),
 		tlsclient.WithClientProfile(profiles.Chrome_146),
 		tlsclient.WithCookieJar(tlsclient.NewCookieJar()),
-		tlsclient.WithDialer(publicResolverDialer()),
-	)
+	}
+	if dial != nil {
+		opts = append(opts, tlsclient.WithDialContext(dial))
+	} else {
+		opts = append(opts, tlsclient.WithDialer(publicResolverDialer()))
+	}
+	hc, err := tlsclient.NewHttpClient(tlsclient.NewNoopLogger(), opts...)
 	if err != nil {
 		return nil, fmt.Errorf("vk: http client: %w", err)
 	}

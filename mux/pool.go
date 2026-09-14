@@ -40,6 +40,9 @@ type Options struct {
 	BackoffMin        time.Duration
 	BackoffMax        time.Duration
 	Logf              func(string, ...any)
+	// DialContext is handed to relay.Allocate for every worker's socket to
+	// the relay; nil means the net package. See relay.Options.DialContext.
+	DialContext func(ctx context.Context, network, address string) (net.Conn, error)
 }
 
 func (o *Options) defaults() {

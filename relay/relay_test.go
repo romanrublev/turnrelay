@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -145,5 +146,87 @@ func TestRestartKeepsAddress(t *testing.T) {
 	defer a.Close()
 	if ts.Allocations() != 1 {
 		t.Fatalf("allocations %d", ts.Allocations())
+	}
+}
+
+// opaqueConn hides the concrete *net.UDPConn so Allocate has to take the
+// generic connected-conn path rather than the *net.UDPConn fast path.
+type opaqueConn struct{ net.Conn }
+
+// TestAllocateWithDialContext: a custom DialContext is used for the socket
+// to the relay, receives the resolved relay address, and the allocation
+// works over what it returns, whether that is a *net.UDPConn or any other
+// connected datagram conn.
+func TestAllocateWithDialContext(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		wrap func(net.Conn) net.Conn
+	}{
+		{"udpconn", func(c net.Conn) net.Conn { return c }},
+		{"opaque conn", func(c net.Conn) net.Conn { return &opaqueConn{c} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := turntest.Start(t)
+			peer, _ := net.ListenPacket("udp4", "127.0.0.1:0")
+			defer peer.Close()
+			go func() {
+				buf := make([]byte, 1500)
+				for {
+					n, from, err := peer.ReadFrom(buf)
+					if err != nil {
+						return
+					}
+					_, _ = peer.WriteTo(buf[:n], from)
+				}
+			}()
+
+			var mu sync.Mutex
+			var dialed []string
+			dial := func(ctx context.Context, network, address string) (net.Conn, error) {
+				mu.Lock()
+				dialed = append(dialed, network+" "+address)
+				mu.Unlock()
+				var d net.Dialer
+				c, err := d.DialContext(ctx, network, address)
+				if err != nil {
+					return nil, err
+				}
+				return tc.wrap(c), nil
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			a, err := relay.Allocate(ctx, relay.Options{Server: ts.Addr(), Username: ts.Username, Password: ts.Password, UDP: true, DialContext: dial})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer a.Close()
+			mu.Lock()
+			got := append([]string(nil), dialed...)
+			mu.Unlock()
+			if len(got) != 1 || got[0] != "udp "+ts.Addr() {
+				t.Fatalf("DialContext calls = %v, want exactly [udp %s]", got, ts.Addr())
+			}
+			rc := a.Relayed()
+			if _, err := rc.WriteTo([]byte("ping"), peer.LocalAddr()); err != nil {
+				t.Fatal(err)
+			}
+			buf := make([]byte, 1500)
+			_ = rc.SetReadDeadline(time.Now().Add(3 * time.Second))
+			n, _, err := rc.ReadFrom(buf)
+			if err != nil || string(buf[:n]) != "ping" {
+				t.Fatalf("echo through custom dialer: n=%d err=%v", n, err)
+			}
+		})
+	}
+}
+
+// TestAllocateDialContextError: a failing DialContext surfaces as the
+// Allocate error and nothing else is dialed.
+func TestAllocateDialContextError(t *testing.T) {
+	boom := errors.New("no route via detour")
+	_, err := relay.Allocate(context.Background(), relay.Options{Server: "127.0.0.1:3478", Username: "u", Password: "p", UDP: true,
+		DialContext: func(context.Context, string, string) (net.Conn, error) { return nil, boom }})
+	if !errors.Is(err, boom) {
+		t.Fatalf("got %v, want wrapped %v", err, boom)
 	}
 }

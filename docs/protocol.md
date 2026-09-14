@@ -58,7 +58,11 @@ same-site`, `Sec-Fetch-Mode: cors`, `Sec-Fetch-Dest: empty`.
 
 DNS for these hosts bypasses the system resolver and asks `77.88.8.8`,
 `77.88.8.1`, `8.8.8.8`, `1.1.1.1` in that order (whitelisted networks often
-break system DNS first).
+break system DNS first). When the embedding application supplies
+`Config.DialContext` (a sing-box outbound passes its own dialer so `detour`
+and `bind_interface` apply), every TCP connection to the VK API is opened
+through it with the unresolved `host:443` instead, and that dialer is
+responsible for name resolution.
 
 `<hash>` is the part of the call link after `join/`
 (`https://vk.ru/call/join/<hash>` or `vk.com`; a bare hash is accepted).
@@ -128,7 +132,11 @@ One allocation per worker, made with pion/turn v5:
 - Transport to the relay: a connected UDP socket by default (640 KiB send
   and receive buffers); TCP (`TURNUDP: false`, CLI `-tcp`) dials the same
   `host:port` over TCP with STUN framing (`turn.NewSTUNConn`). UDP is the
-  recommended transport; the TCP path is slower.
+  recommended transport; the TCP path is slower. With `Config.DialContext`
+  set, the socket is whatever that function returns for `("udp",
+  host:port)` or `("tcp", host:port)`; a UDP conn is driven as a connected
+  PacketConn, and the buffer sizes are applied only when it is a
+  `*net.UDPConn`.
 - `Allocate` with long-term credentials (username and password from the
   provider) and `REQUESTED-ADDRESS-FAMILY` IPv4, or IPv6 when the VPS
   address is IPv6. The reply's relayed address is what the VPS sees as the

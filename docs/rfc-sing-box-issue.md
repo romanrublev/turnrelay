@@ -84,7 +84,7 @@ anton48/vk-turn-proxy server (`-srtp`) in front of WireGuard.
 | `password` | string | `wrap` only: HKDF input for the envelope key |
 | `udp` | bool | transport to the relay, default true (false selects TCP) |
 | `captcha` | `fail` \| `wait` | on a VK captcha, default `fail` |
-| `DialerOptions` | | for the sockets towards the VK API and the relay (`bind_interface`, `detour`) |
+| `DialerOptions` | | for the sockets towards the VK API and the relay (`bind_interface`, `detour`); the library takes them as one `DialContext` hook (`turnrelay.Config.DialContext`) |
 
 ## Transport details
 

@@ -59,6 +59,13 @@ type Config struct {
 	TURNUDP      *bool // nil means true
 	Captcha      CaptchaPolicy
 	Logf         func(string, ...any)
+	// DialContext, when set, opens every socket the library makes: the
+	// UDP (or TCP) socket of each worker towards the TURN relay, and for
+	// provider vk the TCP connections to the VK API. nil uses the net
+	// package (and, for the VK API, a resolver that bypasses system DNS).
+	// A sing-box outbound passes its own dialer here so detour and
+	// bind_interface apply. See relay.Options.DialContext for the contract.
+	DialContext func(ctx context.Context, network, address string) (net.Conn, error)
 	// test hook: replaces the provider entirely
 	Fetcher provider.Fetcher
 }
@@ -106,7 +113,7 @@ func New(cfg Config) (*Dialer, error) {
 		}
 		override = cfg.TURNServer
 		if fetcher == nil {
-			client, err := vk.NewClient()
+			client, err := vk.NewClientWithDialer(cfg.DialContext)
 			if err != nil {
 				return nil, err
 			}
@@ -158,7 +165,7 @@ func New(cfg Config) (*Dialer, error) {
 	d.creds = credpool.New(fetcher, credpool.Options{Links: links, Logf: cfg.Logf})
 	d.pool = mux.New(mux.Options{
 		Workers: cfg.Connections, Peer: d.peer, Wrapper: wrapper, Creds: d.creds,
-		TURNUDP: udp, TURNOverride: override, Logf: cfg.Logf,
+		TURNUDP: udp, TURNOverride: override, Logf: cfg.Logf, DialContext: cfg.DialContext,
 	})
 	return d, nil
 }

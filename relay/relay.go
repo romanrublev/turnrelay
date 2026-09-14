@@ -23,6 +23,14 @@ type Options struct {
 	UDP        bool // true: UDP transport (default and recommended); false: TCP
 	PeerIsIPv6 bool // request an IPv6 relayed address
 	Logger     logging.LoggerFactory
+	// DialContext opens the socket towards the relay. nil uses the net
+	// package directly. It is called once per allocation with network "udp"
+	// (or "tcp" when UDP is false) and the resolved relay host:port; a UDP
+	// conn must be connected to that address, since it is driven as a
+	// PacketConn whose every write goes to the relay. Socket buffers are
+	// enlarged only when the returned conn is a *net.UDPConn. This is the
+	// hook a sing-box outbound uses for detour and bind_interface.
+	DialContext func(ctx context.Context, network, address string) (net.Conn, error)
 }
 
 type Allocation struct {
@@ -35,6 +43,56 @@ type Allocation struct {
 type connectedUDP struct{ *net.UDPConn }
 
 func (c *connectedUDP) WriteTo(b []byte, _ net.Addr) (int, error) { return c.Write(b) }
+
+// connectedConn does the same for any connected datagram net.Conn that a
+// custom DialContext returns: reads are attributed to the relay, writes
+// ignore the destination.
+type connectedConn struct {
+	net.Conn
+	peer net.Addr
+}
+
+func (c *connectedConn) ReadFrom(b []byte) (int, net.Addr, error) {
+	n, err := c.Conn.Read(b)
+	return n, c.peer, err
+}
+
+func (c *connectedConn) WriteTo(b []byte, _ net.Addr) (int, error) { return c.Conn.Write(b) }
+
+// dialUDP opens the connected UDP socket to raddr, through o.DialContext
+// when set.
+func dialUDP(ctx context.Context, o Options, raddr *net.UDPAddr) (net.PacketConn, io.Closer, error) {
+	if o.DialContext == nil {
+		c, err := net.DialUDP("udp", nil, raddr)
+		if err != nil {
+			return nil, nil, err
+		}
+		setBuffers(c)
+		return &connectedUDP{c}, c, nil
+	}
+	c, err := o.DialContext(ctx, "udp", raddr.String())
+	if err != nil {
+		return nil, nil, err
+	}
+	if uc, ok := c.(*net.UDPConn); ok {
+		setBuffers(uc)
+		return &connectedUDP{uc}, uc, nil
+	}
+	return &connectedConn{Conn: c, peer: raddr}, c, nil
+}
+
+func dialTCP(ctx context.Context, o Options, address string) (net.Conn, error) {
+	if o.DialContext == nil {
+		var d net.Dialer
+		return d.DialContext(ctx, "tcp", address)
+	}
+	return o.DialContext(ctx, "tcp", address)
+}
+
+func setBuffers(c *net.UDPConn) {
+	_ = c.SetReadBuffer(640 * 1024)
+	_ = c.SetWriteBuffer(640 * 1024)
+}
 
 func Allocate(ctx context.Context, o Options) (*Allocation, error) {
 	if o.Logger == nil {
@@ -51,16 +109,12 @@ func Allocate(ctx context.Context, o Options) (*Allocation, error) {
 		base     io.Closer
 	)
 	if o.UDP {
-		c, err := net.DialUDP("udp", nil, raddr)
+		turnConn, base, err = dialUDP(ctx, o, raddr)
 		if err != nil {
 			return nil, fmt.Errorf("relay: dial udp: %w", err)
 		}
-		_ = c.SetReadBuffer(640 * 1024)
-		_ = c.SetWriteBuffer(640 * 1024)
-		turnConn, base = &connectedUDP{c}, c
 	} else {
-		var d net.Dialer
-		c, err := d.DialContext(ctx, "tcp", raddr.String())
+		c, err := dialTCP(ctx, o, raddr.String())
 		if err != nil {
 			return nil, fmt.Errorf("relay: dial tcp: %w", err)
 		}
