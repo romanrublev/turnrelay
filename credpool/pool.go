@@ -34,7 +34,10 @@ func (o *Options) defaults() {
 		o.Logf = func(string, ...any) {}
 	}
 	if o.ConnsPerSlot <= 0 {
-		o.ConnsPerSlot = 10
+		// VK's quota is ~20 allocations per credential; 18 leaves a small
+		// margin so a race or a not-yet-expired allocation from a previous
+		// run does not push the last worker in a slot straight into a 486.
+		o.ConnsPerSlot = 18
 	}
 	if o.TTL <= 0 {
 		o.TTL = 10 * time.Minute

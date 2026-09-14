@@ -98,7 +98,7 @@ provider/          Credential, CaptchaRequiredError: what every credential sourc
 provider/vk/       VK Calls anonymous-join chain (login.vk.ru -> api.vk.ru -> calls.okcdn.ru),
                    utls Chrome profile, captcha detection
 provider/static/   fixed username/password for a self-hosted or third-party relay
-credpool/          slots of 10 connections per credential, 3-6 s cooldown between fetches,
+credpool/          slots of 18 connections per credential (VK quota ~20), 3-6 s cooldown,
                    486 -> saturated, TTL 10 min minus safety margin
 relay/             pion/turn allocation (UDP default, TCP fallback), STUN Binding keepalive
                    every 10 s, 486/401 classification

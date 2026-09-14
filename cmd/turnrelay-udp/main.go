@@ -35,7 +35,7 @@ func main() {
 	turnUser := flag.String("turn-user", "", "relay username (provider static)")
 	turnPass := flag.String("turn-pass", "", "relay password (provider static)")
 	server := flag.String("server", "", "VPS host:port running the relay-side server")
-	n := flag.Int("n", turnrelay.DefaultConnections, "TURN allocations (each 10 = one VK participant)")
+	n := flag.Int("n", turnrelay.DefaultConnections, "TURN allocations (about 18 per VK credential/participant)")
 	mode := flag.String("mode", "srtp", "srtp | wrap | dtls")
 	password := flag.String("password", "", "wrap mode: tunnel password")
 	wrapKey := flag.String("wrap-key", "", "wrap mode: raw 32-byte key, hex")

@@ -153,7 +153,7 @@ func New(cfg Config) (*Dialer, error) {
 		cfg.Connections = DefaultConnections
 	}
 	if cfg.Connections < 1 || cfg.Connections > MaxConnections {
-		return nil, fmt.Errorf("turnrelay: connections must be 1..%d (each 10 use one VK participant slot)", MaxConnections)
+		return nil, fmt.Errorf("turnrelay: connections must be 1..%d (about 18 per VK credential/participant)", MaxConnections)
 	}
 	if cfg.Mode == "" {
 		cfg.Mode = ModeSRTP
