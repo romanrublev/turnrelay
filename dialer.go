@@ -170,7 +170,7 @@ func New(cfg Config) (*Dialer, error) {
 		udp = *cfg.TURNUDP
 	}
 	d := &Dialer{cfg: cfg, links: links, peer: net.UDPAddrFromAddrPort(cfg.Server)}
-	d.creds = credpool.New(fetcher, credpool.Options{Links: links, Logf: cfg.Logf})
+	d.creds = credpool.New(fetcher, credpool.Options{Links: links, Logf: cfg.Logf, TTL: 8 * time.Hour, Margin: 30 * time.Minute})
 	d.pool = mux.New(mux.Options{
 		Workers: cfg.Connections, Peer: d.peer, Wrapper: wrapper, Creds: d.creds,
 		TURNUDP: udp, TURNOverride: override, Logf: cfg.Logf, DialContext: cfg.DialContext,

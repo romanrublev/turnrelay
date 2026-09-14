@@ -24,7 +24,7 @@ const (
 	vkCallsAPIVersion = "5.276"
 	// iosUA identifies the native VK Calls app; this path sends no
 	// Origin/Referer (it is not a WebView).
-	iosUA = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148"
+	iosUA = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
 )
 
 // vkCallsGet issues one bodiless POST (VK puts every param in the URL) with
@@ -43,7 +43,17 @@ func (c *Client) vkCallsGet(ctx context.Context, url string) (map[string]any, er
 	}
 	resp, err := doer.Do(req)
 	if err != nil {
-		return nil, err
+		// VK frequently resets a pooled HTTP/2 connection; drop idle
+		// connections and retry once on a fresh one before giving up.
+		if ci, ok := doer.(interface{ CloseIdleConnections() }); ok {
+			ci.CloseIdleConnections()
+		}
+		req2, _ := fhttp.NewRequestWithContext(ctx, "POST", url, nil)
+		req2.Header = req.Header.Clone()
+		resp, err = doer.Do(req2)
+		if err != nil {
+			return nil, err
+		}
 	}
 	defer resp.Body.Close()
 	return decodeJSON(resp)
