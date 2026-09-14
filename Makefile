@@ -1,4 +1,4 @@
-.PHONY: test vet lint build
+.PHONY: test vet build
 test:
 	go test -race -count=1 ./...
 vet:
