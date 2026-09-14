@@ -13,6 +13,7 @@ require (
 	github.com/pion/stun/v4 v4.0.0
 	github.com/pion/transport/v4 v4.1.0
 	github.com/pion/turn/v5 v5.1.1
+	github.com/sagernet/sing v0.9.3
 	golang.org/x/crypto v0.57.0
 )
 
