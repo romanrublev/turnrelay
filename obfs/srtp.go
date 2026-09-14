@@ -202,9 +202,15 @@ func newSRTPConn(d *demux, dc *dtls.Conn, isClient bool) (*srtpConn, error) {
 	if err != nil {
 		return nil, err
 	}
-	var ssrc [4]byte
-	_, _ = rand.Read(ssrc[:])
-	return &srtpConn{d: d, dc: dc, enc: enc, dec: dec, ssrc: binary.BigEndian.Uint32(ssrc[:]), dl: deadline.New(), closed: make(chan struct{})}, nil
+	// RFC 3550 section 5.1: the initial sequence number and timestamp are
+	// random, so a stream does not announce itself by starting at zero.
+	var seed [10]byte
+	_, _ = rand.Read(seed[:])
+	return &srtpConn{d: d, dc: dc, enc: enc, dec: dec,
+		ssrc: binary.BigEndian.Uint32(seed[0:4]),
+		seq:  binary.BigEndian.Uint16(seed[4:6]),
+		ts:   binary.BigEndian.Uint32(seed[6:10]),
+		dl:   deadline.New(), closed: make(chan struct{})}, nil
 }
 
 func (c *srtpConn) Read(b []byte) (int, error) {

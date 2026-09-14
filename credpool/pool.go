@@ -30,14 +30,24 @@ type Options struct {
 }
 
 func (o *Options) defaults() {
+	if o.Logf == nil {
+		o.Logf = func(string, ...any) {}
+	}
 	if o.ConnsPerSlot <= 0 {
 		o.ConnsPerSlot = 10
 	}
-	if o.TTL == 0 {
+	if o.TTL <= 0 {
 		o.TTL = 10 * time.Minute
 	}
-	if o.Margin == 0 {
+	if o.Margin <= 0 {
 		o.Margin = time.Minute
+	}
+	if o.Margin >= o.TTL {
+		// expired() treats a credential as usable for TTL-Margin; a margin
+		// at or above the TTL would make every credential expire the
+		// moment it was fetched and the pool would re-fetch in a loop.
+		o.Logf("credpool: margin %v is not below ttl %v, using %v", o.Margin, o.TTL, o.TTL/10)
+		o.Margin = o.TTL / 10
 	}
 	if o.CooldownMin == 0 && o.CooldownMax == 0 {
 		o.CooldownMin, o.CooldownMax = 3*time.Second, 6*time.Second
@@ -59,9 +69,6 @@ func (o *Options) defaults() {
 				return nil
 			}
 		}
-	}
-	if o.Logf == nil {
-		o.Logf = func(string, ...any) {}
 	}
 }
 
@@ -111,6 +118,15 @@ func New(f Fetcher, o Options) *Pool {
 }
 
 func (p *Pool) linkFor(s int) string { return p.o.Links[s%len(p.o.Links)] }
+
+// shortLink is what the log gets to see of a call link hash: enough to tell
+// links apart, not enough to join the call from a log line.
+func shortLink(link string) string {
+	if len(link) <= 6 {
+		return link
+	}
+	return link[:6] + "..."
+}
 
 // expired reports whether s's credential is older than TTL-Margin. s must
 // be non-nil.
@@ -234,7 +250,7 @@ func (p *Pool) fetchInto(ctx context.Context, id int) error {
 		cred.FetchedAt = p.o.Now()
 	}
 	p.slots[id] = &slot{cred: cred, valid: true, active: map[int]bool{}}
-	p.o.Logf("credpool: slot %d refreshed from %s (%d relays)", id, cred.Link, len(cred.Relays))
+	p.o.Logf("credpool: slot %d refreshed from %s (%d relays)", id, shortLink(cred.Link), len(cred.Relays))
 	return nil
 }
 

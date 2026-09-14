@@ -144,6 +144,7 @@ func TestConfigValidation(t *testing.T) {
 		"too many":       func(c *turnrelay.Config) { c.Connections = 61 },
 		"wrap no key":    func(c *turnrelay.Config) { c.Mode = turnrelay.ModeWrap },
 		"bad mode":       func(c *turnrelay.Config) { c.Mode = "plain" },
+		"bad captcha":    func(c *turnrelay.Config) { c.Captcha = "solve" },
 	}
 	for name, mutate := range cases {
 		c := base
@@ -154,6 +155,13 @@ func TestConfigValidation(t *testing.T) {
 	}
 	if _, err := turnrelay.New(base); err != nil {
 		t.Fatalf("valid config rejected: %v", err)
+	}
+	for _, pol := range []turnrelay.CaptchaPolicy{turnrelay.CaptchaFail, turnrelay.CaptchaWait} {
+		c := base
+		c.Captcha = pol
+		if _, err := turnrelay.New(c); err != nil {
+			t.Fatalf("captcha policy %q rejected: %v", pol, err)
+		}
 	}
 	st := turnrelay.Config{Provider: "static", TURNServer: "1.2.3.4:3478", TURNUsername: "u", TURNPassword: "p", Server: base.Server}
 	if _, err := turnrelay.New(st); err != nil {

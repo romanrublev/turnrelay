@@ -185,8 +185,8 @@ Every `Write` becomes one SRTP packet:
 |---|---|---|---|
 | 0 | 1 | V, P, X, CC | `0x80` (version 2, no padding, no extension, no CSRC) |
 | 1 | 1 | M, PT | `0x64` (marker 0, payload type 100) |
-| 2 | 2 | sequence number | starts at 0, +1 per packet, big-endian |
-| 4 | 4 | timestamp | starts at 0, + payload length per packet |
+| 2 | 2 | sequence number | random initial value (RFC 3550), +1 per packet, big-endian |
+| 4 | 4 | timestamp | random initial value (RFC 3550), + payload length per packet |
 | 8 | 4 | SSRC | random, fixed for the connection |
 | 12 | n | payload | the datagram (WireGuard packet or control frame), AES-128-CM encrypted |
 | 12+n | 10 | authentication tag | HMAC-SHA1, 80 bits, over header and payload |

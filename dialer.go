@@ -150,8 +150,12 @@ func New(cfg Config) (*Dialer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("turnrelay: %w", err)
 	}
-	if cfg.Captcha == "" {
+	switch cfg.Captcha {
+	case "":
 		cfg.Captcha = CaptchaFail
+	case CaptchaFail, CaptchaWait:
+	default:
+		return nil, fmt.Errorf("turnrelay: captcha policy must be %q or %q, got %q", CaptchaFail, CaptchaWait, cfg.Captcha)
 	}
 	// Both policies currently behave the same inside the library: the pool
 	// reports the captcha, cools down for a minute, and workers retry with

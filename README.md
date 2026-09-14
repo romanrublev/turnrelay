@@ -1,7 +1,7 @@
 # turnrelay
 
-Go library that carries UDP datagrams through VK Calls TURN relays, disguised as WebRTC media,
-and exposes them as a dialer for sing-box. Milestone 1: library, `turnrelay-udp` CLI, protocol note.
+Go library that carries UDP datagrams through WebRTC TURN relays (VK Calls and others), disguised
+as WebRTC media, and exposes them as a dialer for sing-box. Milestone 1: library, `turnrelay-udp` CLI, protocol note.
 
 See `docs/protocol.md` and `docs/superpowers/specs/2026-09-14-turnrelay-design.md`.
 

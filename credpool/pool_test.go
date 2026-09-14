@@ -3,6 +3,7 @@ package credpool
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -147,7 +148,7 @@ func TestReleaseAfterSlotReplaced(t *testing.T) {
 		n.Add(1)
 		return provider.Credential{Username: link, Relays: []string{"r"}, Link: link}, nil
 	}
-	p := New(f, opts()) // ConnsPerSlot: 2
+	p := New(f, opts())                         // ConnsPerSlot: 2
 	l0, _ := p.Acquire(context.Background(), 0) // old slot 0, index 0
 	l1, _ := p.Acquire(context.Background(), 1) // old slot 0, index 1
 	if l0.Slot != 0 || l1.Slot != 0 {
@@ -314,5 +315,74 @@ func TestCaptchaBorrowsSpareCapacity(t *testing.T) {
 	_, err = p.Acquire(context.Background(), 9) // own slot 3
 	if !provider.IsCaptcha(err) {
 		t.Fatalf("want captcha error once slot 0 is full, got %v", err)
+	}
+}
+
+// TestDefaultsClampMargin: a margin at or above the TTL would expire every
+// credential on arrival; defaults() clamps it to TTL/10 and says so.
+func TestDefaultsClampMargin(t *testing.T) {
+	var logged []string
+	logf := func(f string, a ...any) { logged = append(logged, fmt.Sprintf(f, a...)) }
+	for _, tc := range []struct {
+		name        string
+		ttl, margin time.Duration
+		want        time.Duration
+		wantLog     bool
+	}{
+		{"margin above ttl", time.Minute, 2 * time.Minute, 6 * time.Second, true},
+		{"margin equals ttl", time.Minute, time.Minute, 6 * time.Second, true},
+		{"sane", 10 * time.Minute, time.Minute, time.Minute, false},
+		{"zero margin gets the default", 10 * time.Minute, 0, time.Minute, false},
+	} {
+		logged = nil
+		o := Options{TTL: tc.ttl, Margin: tc.margin, Logf: logf}
+		o.defaults()
+		if o.Margin != tc.want {
+			t.Errorf("%s: margin %v, want %v", tc.name, o.Margin, tc.want)
+		}
+		if (len(logged) > 0) != tc.wantLog {
+			t.Errorf("%s: logged %v, want log=%v", tc.name, logged, tc.wantLog)
+		}
+		if o.TTL <= o.Margin {
+			t.Errorf("%s: ttl %v not above margin %v", tc.name, o.TTL, o.Margin)
+		}
+	}
+	// A pool built with the clamped values hands out the credential it fetched
+	// instead of treating it as already expired.
+	o := opts()
+	o.TTL, o.Margin = time.Minute, time.Hour
+	p := New(func(_ context.Context, link string) (provider.Credential, error) {
+		return provider.Credential{Username: "u", Relays: []string{"r"}, Link: link}, nil
+	}, o)
+	if _, err := p.Acquire(context.Background(), 0); err != nil {
+		t.Fatal(err)
+	}
+	if st := p.Stats(); st.Slots != 1 || st.Active != 1 {
+		t.Fatalf("stats %+v", st)
+	}
+}
+
+// TestRefreshLogTruncatesLink: the refresh log line shows only the first
+// six characters of the call link hash.
+func TestRefreshLogTruncatesLink(t *testing.T) {
+	const link = "AbCdEfGhIjKlMnOp"
+	var logged []string
+	o := opts()
+	o.Links = []string{link}
+	o.Logf = func(f string, a ...any) { logged = append(logged, fmt.Sprintf(f, a...)) }
+	p := New(func(_ context.Context, link string) (provider.Credential, error) {
+		return provider.Credential{Username: "u", Relays: []string{"r"}, Link: link}, nil
+	}, o)
+	if _, err := p.Acquire(context.Background(), 0); err != nil {
+		t.Fatal(err)
+	}
+	if len(logged) != 1 {
+		t.Fatalf("logged %v", logged)
+	}
+	if strings.Contains(logged[0], link) || !strings.Contains(logged[0], "AbCdEf...") {
+		t.Fatalf("log line %q, want the link cut to AbCdEf...", logged[0])
+	}
+	if shortLink("static") != "static" || shortLink("abc") != "abc" {
+		t.Fatal("short links must stay intact")
 	}
 }
