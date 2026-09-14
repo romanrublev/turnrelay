@@ -99,6 +99,11 @@ func (s *Server) Serve(ctx context.Context) error {
 		case <-s.closed:
 		}
 		_ = ln.Close()
+		// Stop the UDP side too: serveUDP blocks on the demux's UDP
+		// ReadFrom, which only unblocks when the demux closes. Close is
+		// sync.Once-guarded, so this is safe even if the caller also
+		// calls Server.Close directly.
+		_ = s.Close()
 	}()
 	go s.serveUDP(ctx)
 	for {

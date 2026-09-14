@@ -162,3 +162,74 @@ func TestServerUDPFramesEcho(t *testing.T) {
 		t.Fatalf("reply source %s, want the echo port", from)
 	}
 }
+
+// TestServerDeniesFqdnResolvingToLoopback exercises resolveChecked's
+// resolve-then-loop branch: an FQDN that resolves to a loopback address
+// must be refused by the default (AllowPrivate=false) server just like a
+// literal loopback IP is.
+func TestServerDeniesFqdnResolvingToLoopback(t *testing.T) {
+	echo := tcpEcho(t)
+	server := startServer(t, ServerOptions{})
+	sess, _ := rawClient(t, server)
+	st, err := sess.OpenStream()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	port := netip.MustParseAddrPort(echo.String()).Port()
+	dest := M.ParseSocksaddrHostPort("localhost", port)
+	if err := WriteStreamHeader(st, dest); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = st.Write([]byte("ping"))
+	_ = st.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if n, err := st.Read(make([]byte, 16)); err == nil {
+		t.Fatalf("fqdn resolving to loopback served %d bytes", n)
+	}
+}
+
+// TestServerStopsOnCtxCancel checks that cancelling ctx tears down both the
+// KCP and the UDP side of Serve, not just the KCP listener.
+func TestServerStopsOnCtxCancel(t *testing.T) {
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := NewServer(pc, ServerOptions{AllowPrivate: true})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.Serve(ctx) }()
+	time.Sleep(50 * time.Millisecond) // let Serve start accepting
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Serve returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Serve did not return within 2s of ctx cancel")
+	}
+	t.Cleanup(func() { s.Close() })
+
+	// The UDP side must be down too: a frame sent to the server's address
+	// now gets no reply within a short deadline.
+	echo := udpEcho(t)
+	cpc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := NewDemux(cpc)
+	t.Cleanup(func() { d.Close() })
+	frame, err := EncodeUDPFrame(1, M.SocksaddrFromNet(echo), []byte("x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.UDP().WriteTo(frame, pc.LocalAddr()); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 128)
+	_ = d.UDP().SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	if n, _, err := d.UDP().ReadFrom(buf); err == nil {
+		t.Fatalf("got %d bytes after Serve stopped on ctx cancel, want nothing", n)
+	}
+}
