@@ -37,15 +37,16 @@ func (c *datagramConn) Read(b []byte) (int, error) {
 		return 0, net.ErrClosed
 	default:
 	}
-	pkt, err := c.d.pool.Read(c.readCtx())
+	ctx := c.readCtx()
+	pkt, err := c.d.pool.Read(ctx)
 	if err != nil {
-		if c.readCtx().Err() != nil {
-			select {
-			case <-c.closed:
-				return 0, net.ErrClosed
-			default:
-				return 0, os.ErrDeadlineExceeded
-			}
+		select {
+		case <-c.closed:
+			return 0, net.ErrClosed
+		default:
+		}
+		if ctx.Err() != nil {
+			return 0, os.ErrDeadlineExceeded
 		}
 		return 0, err
 	}
@@ -65,7 +66,12 @@ func (c *datagramConn) Write(b []byte) (int, error) {
 }
 
 func (c *datagramConn) Close() error {
-	c.once.Do(func() { close(c.closed); c.rstop() })
+	c.once.Do(func() {
+		close(c.closed)
+		c.mu.Lock()
+		c.rstop()
+		c.mu.Unlock()
+	})
 	return nil
 }
 
@@ -76,13 +82,26 @@ func (c *datagramConn) SetDeadline(t time.Time) error    { return c.SetReadDeadl
 func (c *datagramConn) SetWriteDeadline(time.Time) error { return nil }
 
 // SetReadDeadline cancels any in-flight Read's context before installing the
-// new one. Even the zero-time reset therefore interrupts a currently-blocked
-// Read, which comes back with os.ErrDeadlineExceeded rather than continuing
-// to block. pion and wireguard-go only call SetReadDeadline(time.Now()) to
-// interrupt reads on shutdown, so this matches what they expect.
+// new one, regardless of what t is: a currently-parked Read always wakes up
+// with os.ErrDeadlineExceeded, even when t is the zero time (which otherwise
+// just means "no deadline" going forward) or a deadline far in the future.
+// pion and wireguard-go rely on exactly this to interrupt a blocked Read by
+// calling SetReadDeadline(time.Now()) or SetReadDeadline(time.Time{}) from
+// another goroutine; a version that only interrupted on an already-past
+// deadline would leave those callers blocked.
+//
+// After Close, SetReadDeadline is a no-op that returns net.ErrClosed instead
+// of installing a new context: Close only cancels the context that exists at
+// the moment it runs, so a context created afterwards would never be
+// canceled and its deadline timer would leak.
 func (c *datagramConn) SetReadDeadline(t time.Time) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	select {
+	case <-c.closed:
+		return net.ErrClosed
+	default:
+	}
 	c.rstop()
 	if t.IsZero() {
 		c.rctx, c.rstop = context.WithCancel(context.Background())

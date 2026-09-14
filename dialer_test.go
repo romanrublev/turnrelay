@@ -2,8 +2,10 @@ package turnrelay_test
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/netip"
+	"os"
 	"testing"
 	"time"
 
@@ -155,5 +157,123 @@ func TestConfigValidation(t *testing.T) {
 	st := turnrelay.Config{Provider: "static", TURNServer: "1.2.3.4:3478", TURNUsername: "u", TURNPassword: "p", Server: base.Server}
 	if _, err := turnrelay.New(st); err != nil {
 		t.Fatalf("valid static config rejected: %v", err)
+	}
+}
+
+func TestReadDeadlineInterrupts(t *testing.T) {
+	d := newDialer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := d.WaitReady(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	c, err := d.DialContext(ctx, "udp", M.ParseSocksaddr("203.0.113.5:56004"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	// interrupt parks a Read, then after a short delay calls
+	// SetReadDeadline(deadline) from this goroutine and asserts the parked
+	// Read wakes up with a timeout error rather than raw context.Canceled.
+	interrupt := func(deadline time.Time) {
+		t.Helper()
+		errCh := make(chan error, 1)
+		go func() {
+			_, err := c.Read(make([]byte, 16))
+			errCh <- err
+		}()
+		time.Sleep(100 * time.Millisecond)
+		if err := c.SetReadDeadline(deadline); err != nil {
+			t.Fatalf("SetReadDeadline(%v): %v", deadline, err)
+		}
+		select {
+		case err := <-errCh:
+			if !errors.Is(err, os.ErrDeadlineExceeded) {
+				t.Fatalf("deadline %v: err = %v, want os.ErrDeadlineExceeded", deadline, err)
+			}
+			ne, ok := err.(net.Error)
+			if !ok || !ne.Timeout() {
+				t.Fatalf("deadline %v: err = %v, want a timeout net.Error", deadline, err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("deadline %v: Read did not return within 2s", deadline)
+		}
+	}
+
+	interrupt(time.Now())
+	interrupt(time.Time{})               // zero deadline: still interrupts a parked Read
+	interrupt(time.Now().Add(time.Hour)) // far-future deadline: still interrupts a parked Read
+
+	// After clearing the deadline, a Read blocks normally and returns a
+	// datagram once one arrives.
+	if err := c.SetReadDeadline(time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Write([]byte("hello")); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 16)
+	_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	n, err := c.Read(buf)
+	if err != nil || string(buf[:n]) != "hello" {
+		t.Fatalf("n=%d err=%v", n, err)
+	}
+}
+
+func TestConnAfterClose(t *testing.T) {
+	d := newDialer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := d.WaitReady(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	c, err := d.DialContext(ctx, "udp", M.ParseSocksaddr("203.0.113.5:56004"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+	if _, err := c.Read(make([]byte, 16)); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("Read after close: %v", err)
+	}
+	if _, err := c.Write([]byte("x")); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("Write after close: %v", err)
+	}
+	if err := c.SetReadDeadline(time.Now()); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("SetReadDeadline after close: %v", err)
+	}
+}
+
+func TestTwoConnsShareDownlink(t *testing.T) {
+	d := newDialer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := d.WaitReady(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	c1, err := d.DialContext(ctx, "udp", M.ParseSocksaddr("203.0.113.5:56004"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c1.Close()
+	c2, err := d.DialContext(ctx, "udp", M.ParseSocksaddr("203.0.113.5:56004"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c2.Close()
+
+	if _, err := c1.Write([]byte("shared")); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 16)
+	_ = c2.SetReadDeadline(time.Now().Add(5 * time.Second))
+	n, err := c2.Read(buf)
+	if err != nil || string(buf[:n]) != "shared" {
+		t.Fatalf("n=%d err=%v", n, err)
 	}
 }
