@@ -30,9 +30,11 @@ A Homebrew tap is a git repo named `homebrew-<name>`.
 
 ```
 brew tap romanrublev/turnrelay
-brew install --HEAD romanrublev/turnrelay/turnrelay   # or without --HEAD once a release is tagged
+HOMEBREW_NO_SANDBOX=1 brew install --HEAD romanrublev/turnrelay/turnrelay
 sudo turnrelay install                                # sets up the launchd/systemd service + socket owner
 ```
+
+`HOMEBREW_NO_SANDBOX=1` is required for the from-source build (see Notes).
 
 Then create the profile and use it (`turnrelay up` / `status` / `down`) as the
 formula's caveats describe.
@@ -43,10 +45,12 @@ formula's caveats describe.
   is set up by `sudo turnrelay install` (which writes the owner-uid file that the
   daemon needs), not by `brew services` - `brew services` would start the daemon
   without that file. Use the bundled installer.
-- The build fetches Go module dependencies. If Homebrew's build sandbox blocks
-  network for module downloads on your setup, either vendor the app module
-  (`cd app && go mod vendor`, commit `app/vendor/`) so the build is offline, or
-  install with `--HEAD` after a `go mod download` warms the cache. This is the
-  one step to verify on first real `brew install`.
+- The build fetches Go module dependencies, which Homebrew's build sandbox
+  blocks (`go mod download` gets connection-reset). Install with
+  `HOMEBREW_NO_SANDBOX=1` to allow network during the build. Verified working
+  on macOS. Vendoring the app module to build offline is not viable here: the
+  full sing-box + gvisor tree vendors to ~1.7 GB, too large to commit. The
+  proper long-term fix is a prebuilt bottle (binary) attached to a GitHub
+  release, so users install without building or disabling the sandbox.
 - The GUI tray (`tray/` module, cgo) can ship as a second formula built with
   `cd tray && go build -o bin/turnrelay-tray .`; it is not included here yet.
