@@ -29,6 +29,11 @@ func Serve(ln *net.UnixListener, ownerUID uint32, h Handler) error {
 
 func handleConn(conn *net.UnixConn, ownerUID uint32, h Handler) {
 	defer conn.Close()
+	defer func() {
+		if r := recover(); r != nil {
+			proto.WriteMessage(conn, proto.Response{OK: false, Error: "internal error"})
+		}
+	}()
 	uid, err := peerUID(conn)
 	if err != nil || uid != ownerUID {
 		proto.WriteMessage(conn, proto.Response{OK: false, Error: "unauthorized"})

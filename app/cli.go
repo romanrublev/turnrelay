@@ -57,19 +57,39 @@ func cmdDaemon(stdout, stderr io.Writer) int {
 		return 1
 	}
 	path := platform.SocketPath()
-	_ = os.Remove(path)
-	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	ln, err := listenControlSocket(path, owner)
 	if err != nil {
-		fmt.Fprintf(stderr, "daemon: listen %s: %v\n", path, err)
+		fmt.Fprintf(stderr, "daemon: %v\n", err)
 		return 1
 	}
-	_ = os.Chmod(path, 0o660)
 	fmt.Fprintf(stdout, "turnrelay daemon listening on %s\n", path)
 	if err := control.Serve(ln, owner, daemon.New()); err != nil {
 		fmt.Fprintf(stderr, "daemon: %v\n", err)
 		return 1
 	}
 	return 0
+}
+
+// listenControlSocket creates the control-plane unix socket at path, then
+// chowns it to owner (the human user uid recorded at install time) and
+// chmods it 0o660 so that owner can connect() to a listener created by root.
+// A socket the owner cannot reach is a fatal misconfiguration, so any chown
+// or chmod failure fails the whole call rather than being ignored.
+func listenControlSocket(path string, owner uint32) (*net.UnixListener, error) {
+	_ = os.Remove(path)
+	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	if err != nil {
+		return nil, fmt.Errorf("listen %s: %w", path, err)
+	}
+	if err := os.Chown(path, int(owner), -1); err != nil {
+		ln.Close()
+		return nil, fmt.Errorf("chown %s to uid %d: %w", path, owner, err)
+	}
+	if err := os.Chmod(path, 0o660); err != nil {
+		ln.Close()
+		return nil, fmt.Errorf("chmod %s: %w", path, err)
+	}
+	return ln, nil
 }
 
 func readOwnerUID() (uint32, error) {
