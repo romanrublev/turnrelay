@@ -56,6 +56,17 @@ func cmdDaemon(stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "daemon: owner uid: %v\n", err)
 		return 1
 	}
+	// Move to a writable working directory: launchd starts the daemon in "/"
+	// (read-only), and sing-box writes cache.db relative to the cwd.
+	runDir := platform.RunDir()
+	if err := os.MkdirAll(runDir, 0o700); err != nil {
+		fmt.Fprintf(stderr, "daemon: create run dir %s: %v\n", runDir, err)
+		return 1
+	}
+	if err := os.Chdir(runDir); err != nil {
+		fmt.Fprintf(stderr, "daemon: chdir %s: %v\n", runDir, err)
+		return 1
+	}
 	path := platform.SocketPath()
 	ln, err := listenControlSocket(path, owner)
 	if err != nil {
