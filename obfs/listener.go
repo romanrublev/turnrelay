@@ -12,7 +12,6 @@ import (
 	"github.com/pion/dtls/v3"
 	"github.com/pion/dtls/v3/pkg/crypto/selfsign"
 	"github.com/pion/transport/v4/deadline"
-	pionudp "github.com/pion/transport/v4/udp"
 )
 
 // Listener is the server side of one obfuscation mode: it accepts obfuscated
@@ -121,65 +120,83 @@ func listenDTLS(address string, cert tls.Certificate) (*Listener, error) {
 	return l, nil
 }
 
-// udpConnPacketConn adapts a connection-oriented net.Conn (one per source
-// address, as returned by pion/transport's udp.Listen) into a net.PacketConn:
-// NewWrapPacketConn and dtls.ServerWithOptions both want ReadFrom/WriteTo,
-// not Read/Write, and the peer address never changes for a given conn.
-type udpConnPacketConn struct {
-	net.Conn
-}
-
-func (c *udpConnPacketConn) ReadFrom(b []byte) (int, net.Addr, error) {
-	n, err := c.Conn.Read(b)
-	return n, c.Conn.RemoteAddr(), err
-}
-
-func (c *udpConnPacketConn) WriteTo(b []byte, _ net.Addr) (int, error) {
-	return c.Conn.Write(b)
-}
-
 func listenWrap(address string, cert tls.Certificate, key []byte, video bool) (*Listener, error) {
 	laddr, err := net.ResolveUDPAddr("udp", address)
 	if err != nil {
 		return nil, err
 	}
-	pl, err := pionudp.Listen("udp", laddr)
+	raw, err := net.ListenUDP("udp", laddr)
 	if err != nil {
 		return nil, err
 	}
-	l := &Listener{addr: pl.Addr(), conns: make(chan net.Conn, 64)}
+	l := &Listener{addr: raw.LocalAddr(), conns: make(chan net.Conn, 64)}
 	ctx, cancel := context.WithCancel(context.Background())
-	l.close = func() { cancel(); _ = pl.Close() }
-	go func() {
-		for {
-			c, err := pl.Accept()
-			if err != nil {
-				return
-			}
-			go func() {
-				raddr := c.RemoteAddr()
-				codec, err := NewWrapCodec(key, video)
-				if err != nil {
-					return
-				}
-				pc := NewWrapPacketConn(&udpConnPacketConn{c}, codec)
-				dc, err := dtls.ServerWithOptions(pc, raddr, serverOptions(cert)...)
-				if err != nil {
-					return
-				}
-				if err := dc.HandshakeContext(ctx); err != nil {
-					_ = dc.Close()
-					return
-				}
-				select {
-				case l.conns <- dc:
-				case <-ctx.Done():
-					_ = dc.Close()
-				}
-			}()
-		}
-	}()
+	l.close = func() { cancel(); _ = raw.Close() }
+	go serveWrap(ctx, raw, cert, key, video, l.conns)
 	return l, nil
+}
+
+// serveWrap is the WDTT server's per-source demux over one UDP socket, in the
+// same shape as serveSRTP: it keys sessions by source address and hands each
+// source's packets to a WRAP-then-DTLS handshake. It replaces pion's
+// udp.Listener, whose internal WaitGroup is not safe against Accept racing
+// Close.
+func serveWrap(ctx context.Context, raw net.PacketConn, cert tls.Certificate, key []byte, video bool, out chan<- net.Conn) {
+	var mu sync.Mutex
+	sessions := make(map[string]chan []byte)
+	buf := make([]byte, 2048)
+	for {
+		n, addr, err := raw.ReadFrom(buf)
+		if err != nil {
+			return
+		}
+		if n == 0 {
+			continue
+		}
+		pkt := make([]byte, n)
+		copy(pkt, buf[:n])
+
+		srcKey := addr.String()
+		mu.Lock()
+		ch, ok := sessions[srcKey]
+		if !ok {
+			ch = make(chan []byte, 64)
+			sessions[srcKey] = ch
+			go acceptWrapSession(ctx, raw, addr, cert, key, video, ch, out)
+		}
+		mu.Unlock()
+
+		select {
+		case ch <- pkt:
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+func acceptWrapSession(ctx context.Context, raw net.PacketConn, src net.Addr, cert tls.Certificate, key []byte, video bool, pkts chan []byte, out chan<- net.Conn) {
+	codec, err := NewWrapCodec(key, video)
+	if err != nil {
+		return
+	}
+	// side delivers this source's raw packets (still WRAP-enveloped) and writes
+	// back to the shared socket; NewWrapPacketConn unwraps on read and wraps on
+	// write, and DTLS runs on top of that.
+	side := &sessionConn{ctx: ctx, raw: raw, src: src, dtlsCh: pkts, dl: deadline.New()}
+	pc := NewWrapPacketConn(side, codec)
+	dc, err := dtls.ServerWithOptions(pc, src, serverOptions(cert)...)
+	if err != nil {
+		return
+	}
+	if err := dc.HandshakeContext(ctx); err != nil {
+		_ = dc.Close()
+		return
+	}
+	select {
+	case out <- dc:
+	case <-ctx.Done():
+		_ = dc.Close()
+	}
 }
 
 func listenSRTP(address string, cert tls.Certificate) (*Listener, error) {
