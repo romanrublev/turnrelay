@@ -23,7 +23,18 @@ func dispatch(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	switch args[0] {
-	// subcommands are wired in later tasks
+	case "up":
+		return cmdUp(stdout, stderr)
+	case "down":
+		return cmdDown(stdout, stderr)
+	case "status":
+		return cmdStatus(stdout, stderr)
+	case "daemon":
+		return cmdDaemon(stdout, stderr)
+	case "install":
+		return cmdInstall(stderr)
+	case "uninstall":
+		return cmdUninstall(stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown command %q\n\n%s", args[0], usage)
 		return 2
