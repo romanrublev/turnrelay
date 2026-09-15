@@ -2,6 +2,7 @@
 /dist/
 *.test
 *.out
+cache.db
 .env
 /test/e2e/*.local.*
 /.superpowers/
