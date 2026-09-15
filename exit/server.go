@@ -296,6 +296,15 @@ func (s *Server) assocFor(ctx context.Context, peer net.Addr, id uint16, udp net
 	if a, ok := s.assocs[key]; ok {
 		return a, nil
 	}
+	// Do not create a new association once the server is closing: Close's
+	// one-shot stop-loop over s.assocs may already have passed, and a new
+	// association's reply goroutine would then never be told to exit. Both
+	// this check and Close's stop-loop run under s.amu, so they serialise.
+	select {
+	case <-s.closed:
+		return nil, net.ErrClosed
+	default:
+	}
 	bind := ":0"
 	if s.o.Bind != "" {
 		bind = net.JoinHostPort(s.o.Bind, "0")
