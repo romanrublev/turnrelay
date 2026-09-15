@@ -142,8 +142,8 @@ func listenWrap(address string, cert tls.Certificate, key []byte, video bool) (*
 // udp.Listener, whose internal WaitGroup is not safe against Accept racing
 // Close.
 func serveWrap(ctx context.Context, raw net.PacketConn, cert tls.Certificate, key []byte, video bool, out chan<- net.Conn) {
-	var mu sync.Mutex
-	sessions := make(map[string]chan []byte)
+	ps := newPerSource(srcSessionTTL)
+	go ps.reap(ctx)
 	buf := make([]byte, 2048)
 	for {
 		n, addr, err := raw.ReadFrom(buf)
@@ -156,21 +156,12 @@ func serveWrap(ctx context.Context, raw net.PacketConn, cert tls.Certificate, ke
 		pkt := make([]byte, n)
 		copy(pkt, buf[:n])
 
-		srcKey := addr.String()
-		mu.Lock()
-		ch, ok := sessions[srcKey]
-		if !ok {
-			ch = make(chan []byte, 64)
-			sessions[srcKey] = ch
-			go acceptWrapSession(ctx, raw, addr, cert, key, video, ch, out)
-		}
-		mu.Unlock()
-
-		select {
-		case ch <- pkt:
-		case <-ctx.Done():
-			return
-		}
+		src := addr
+		ps.dispatch(time.Now(), addr.String(), func() (func([]byte), bool) {
+			ch := make(chan []byte, 64)
+			go acceptWrapSession(ctx, raw, src, cert, key, video, ch, out)
+			return func(p []byte) { trySend(ch, p) }, true
+		}, pkt)
 	}
 }
 
@@ -216,6 +207,89 @@ func listenSRTP(address string, cert tls.Certificate) (*Listener, error) {
 	return l, nil
 }
 
+// srcSessionTTL is how long a per-source demux entry lives with no packets
+// before the reaper drops it. It is well above the client's zombie timeout
+// (mux ZombieAfter, 120s), so only sessions already dead upstream are reaped,
+// while roaming or NAT-rebinding sources cannot grow the map without bound.
+var srcSessionTTL = 5 * time.Minute
+
+// trySend delivers a packet to a per-source channel without blocking: a full
+// channel drops the packet (DTLS retransmits its handshake and media payload
+// is best effort), so one slow or flooding source cannot stall the shared read
+// loop for every other source.
+func trySend(ch chan []byte, pkt []byte) {
+	select {
+	case ch <- pkt:
+	default:
+	}
+}
+
+type srcEntry struct {
+	deliver  func(pkt []byte)
+	lastSeen time.Time
+}
+
+// perSource is the shared per-source-address demux state for serveSRTP and
+// serveWrap: it maps a source address to its delivery closure, refreshes a
+// last-seen timestamp, and reaps idle entries so the map stays bounded.
+type perSource struct {
+	mu       sync.Mutex
+	sessions map[string]*srcEntry
+	ttl      time.Duration
+}
+
+func newPerSource(ttl time.Duration) *perSource {
+	return &perSource{sessions: map[string]*srcEntry{}, ttl: ttl}
+}
+
+// dispatch routes one packet to its source's delivery closure, creating the
+// source (via newEntry) on first sight. newEntry returns (deliver, ok); ok
+// false means the source could not be set up, and the packet is dropped. The
+// delivery closure runs outside the lock and must not block.
+func (p *perSource) dispatch(now time.Time, key string, newEntry func() (func([]byte), bool), pkt []byte) {
+	p.mu.Lock()
+	e, ok := p.sessions[key]
+	if !ok {
+		deliver, valid := newEntry()
+		if !valid {
+			p.mu.Unlock()
+			return
+		}
+		e = &srcEntry{deliver: deliver}
+		p.sessions[key] = e
+	}
+	e.lastSeen = now
+	deliver := e.deliver
+	p.mu.Unlock()
+	deliver(pkt)
+}
+
+// reap drops sources with no packet for ttl until ctx ends.
+func (p *perSource) reap(ctx context.Context) {
+	t := time.NewTicker(p.ttl / 2)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-t.C:
+			p.mu.Lock()
+			for key, e := range p.sessions {
+				if now.Sub(e.lastSeen) > p.ttl {
+					delete(p.sessions, key)
+				}
+			}
+			p.mu.Unlock()
+		}
+	}
+}
+
+func (p *perSource) len() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.sessions)
+}
+
 // srtpSession is the per-source state serveSRTP demuxes packets into: a
 // pending or completed DTLS-SRTP connection from one client address.
 type srtpSession struct {
@@ -231,8 +305,8 @@ type srtpSession struct {
 // Later packets from the same source are dispatched to that session's
 // dtlsCh or rtpCh by the same first-byte rule obfs uses on the client side.
 func serveSRTP(ctx context.Context, raw net.PacketConn, opts []dtls.ServerOption, out chan<- net.Conn) {
-	var mu sync.Mutex
-	sessions := make(map[string]*srtpSession)
+	ps := newPerSource(srcSessionTTL)
+	go ps.reap(ctx)
 	buf := make([]byte, 2048)
 	for {
 		n, addr, err := raw.ReadFrom(buf)
@@ -245,30 +319,19 @@ func serveSRTP(ctx context.Context, raw net.PacketConn, opts []dtls.ServerOption
 		pkt := make([]byte, n)
 		copy(pkt, buf[:n])
 
-		key := addr.String()
-		mu.Lock()
-		sess, ok := sessions[key]
-		if !ok {
-			sess = &srtpSession{dtlsCh: make(chan []byte, 64), rtpCh: make(chan []byte, 2048)}
-			sessions[key] = sess
-			go acceptSRTPSession(ctx, raw, addr, opts, sess, out)
-		}
-		mu.Unlock()
-
-		var ch chan []byte
-		switch {
-		case isDTLSByte(pkt[0]):
-			ch = sess.dtlsCh
-		case isRTPByte(pkt[0]):
-			ch = sess.rtpCh
-		default:
-			continue
-		}
-		select {
-		case ch <- pkt:
-		case <-ctx.Done():
-			return
-		}
+		src := addr
+		ps.dispatch(time.Now(), addr.String(), func() (func([]byte), bool) {
+			sess := &srtpSession{dtlsCh: make(chan []byte, 64), rtpCh: make(chan []byte, 2048)}
+			go acceptSRTPSession(ctx, raw, src, opts, sess, out)
+			return func(p []byte) {
+				switch {
+				case isDTLSByte(p[0]):
+					trySend(sess.dtlsCh, p)
+				case isRTPByte(p[0]):
+					trySend(sess.rtpCh, p)
+				}
+			}, true
+		}, pkt)
 	}
 }
 
