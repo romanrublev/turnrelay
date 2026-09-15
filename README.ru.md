@@ -8,15 +8,20 @@
 `turnrelay` - это Go-библиотека и CLI, которые открывают набор TURN-аллокаций
 на релее (по умолчанию VK Calls, либо любой релей, к которому у вас есть
 учётные данные), маскируют каждую под зашифрованный медиапоток WebRTC и
-представляют их как единый UDP-канал. Поверх этого канала работает
-WireGuard-туннель, а sing-box занимается собственно маршрутизацией, так что вы
+представляют их как единый UDP-канал. sing-box потребляет его как нативный
+outbound `turnrelay` и занимается собственно маршрутизацией, так что вы
 получаете настоящие правила по доменам/geosite/geoip поверх транспорта,
 который проходит в сетях, где доступны лишь несколько отечественных сервисов.
+Он подключается к sing-box либо за endpoint `wireguard`, либо, в режиме
+exit-сервера `turnrelay-server`, как обычный TCP+UDP outbound вообще без
+WireGuard.
 
-> **Статус: бета.** Библиотека, CLI `turnrelay-udp` и провайдер VK Calls
-> работают целиком (что дальше - см. [ROADMAP](ROADMAP.ru.md)). Нативного
-> outbound для sing-box пока нет; сейчас `turnrelay-udp` запускается рядом с
-> sing-box.
+> **Статус: бета.** Библиотека, оба CLI (`turnrelay-udp`, `turnrelay-proxy`),
+> провайдер VK Calls, нативный outbound `turnrelay` для sing-box (модуль
+> [`singbox/`](singbox/)) и режим proxy-exit `turnrelay-server` работают
+> целиком. WireGuard опционален: используйте нативный outbound за endpoint
+> `wireguard` либо запустите `turnrelay-server` и откажитесь от WireGuard
+> совсем. См. [ROADMAP](ROADMAP.ru.md).
 
 > **Для исследовательских и учебных целей.** Прогон трафика через сервис
 > звонков нарушает его условия использования и может привести к ограничению
@@ -59,6 +64,13 @@ VK Calls обязаны там работать, поэтому их TURN-рел
   обфускация, а лишь чтобы мультиплексировать аллокации в один упорядоченный
   поток.
 - **sing-box** применяет ваши правила и решает, что попадает в туннель.
+
+Это сценарий с WireGuard. Можно также обойтись без моста `turnrelay-udp` и
+зарегистрировать нативный outbound `turnrelay` прямо в sing-box (модуль
+[`singbox/`](singbox/)), а от WireGuard отказаться совсем через режим
+exit-сервера `turnrelay-server` (`"server_type": "exit"`), где сервер сам
+подключается к адресам назначения. См. [singbox/README.md](singbox/README.md)
+и [docs/server-setup.ru.md](docs/server-setup.ru.md#сервер-выход-без-wireguard).
 
 Два сценария из одних и тех же кирпичей:
 
@@ -149,6 +161,8 @@ turnrelay-udp \
 
 ## Документация
 
+- [singbox/README.md](singbox/README.md) - нативный outbound `turnrelay` для
+  sing-box и режим exit (на английском).
 - [docs/protocol.md](docs/protocol.md) - протокол на проводе, шаг за шагом
   (на английском).
 - [docs/server-setup.ru.md](docs/server-setup.ru.md) - настройка сервера и

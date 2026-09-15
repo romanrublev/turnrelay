@@ -9,15 +9,19 @@ media, and route it with sing-box.
 `turnrelay` is a Go library and CLI that opens a set of TURN allocations on a
 relay (VK Calls by default, or any relay you have credentials for), wraps
 each one to look like an encrypted WebRTC media stream, and presents them as
-a single UDP pipe. A WireGuard tunnel rides over that pipe, and sing-box does
-the actual routing on top - so you get real domain/geosite/geoip rules over a
-transport that survives networks where only a few domestic services are
-reachable.
+a single UDP pipe. sing-box consumes it as a native `turnrelay` outbound and
+does the actual routing on top, so you get real domain/geosite/geoip rules
+over a transport that survives networks where only a few domestic services
+are reachable. It plugs into sing-box either behind a `wireguard` endpoint or,
+with the `turnrelay-server` exit mode, as a plain TCP+UDP outbound with no
+WireGuard at all.
 
-> **Status: beta.** The library, the `turnrelay-udp` CLI and the VK Calls
-> provider work end to end (see [Roadmap](ROADMAP.md) for what is next). The
-> native sing-box outbound is not built yet; today you run `turnrelay-udp`
-> alongside sing-box.
+> **Status: beta.** The library, both CLIs (`turnrelay-udp`, `turnrelay-proxy`),
+> the VK Calls provider, the native sing-box `turnrelay` outbound (the
+> [`singbox/`](singbox/) module) and the `turnrelay-server` proxy-exit mode all
+> work end to end. WireGuard is optional: use the native outbound behind a
+> `wireguard` endpoint, or run `turnrelay-server` and drop WireGuard entirely.
+> See the [Roadmap](ROADMAP.md).
 
 > **For research and educational use.** Tunnelling traffic through a call
 > service is against its terms of use and can get the account that creates
@@ -57,6 +61,13 @@ your traffic ─▶ sing-box (routing rules)
   the L4 transport. It is *not* used for routing or as the obfuscation - just
   to multiplex the allocations into one ordered stream.
 - **sing-box** applies your routing rules and decides what enters the tunnel.
+
+That is the WireGuard deployment. You can also skip the `turnrelay-udp` bridge
+and register the native `turnrelay` outbound directly in sing-box (the
+[`singbox/`](singbox/) module), and skip WireGuard entirely with the
+`turnrelay-server` exit mode (`"server_type": "exit"`), where the server dials
+destinations itself. See [singbox/README.md](singbox/README.md) and
+[docs/server-setup.md](docs/server-setup.md#exit-server-no-wireguard).
 
 Two deployments, same building blocks:
 
@@ -149,6 +160,7 @@ Notes:
 
 ## Documentation
 
+- [singbox/README.md](singbox/README.md) - the native sing-box `turnrelay` outbound and exit mode.
 - [docs/protocol.md](docs/protocol.md) - the wire protocol, hop by hop.
 - [docs/server-setup.md](docs/server-setup.md) - server and client setup.
 - [ROADMAP.md](ROADMAP.md) - what is done and what is planned.
