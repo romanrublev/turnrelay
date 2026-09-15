@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -36,11 +37,26 @@ func cmdDown(stdout, stderr io.Writer) int {
 	return 0
 }
 
-func cmdStatus(stdout, stderr io.Writer) int {
+func cmdStatus(args []string, stdout, stderr io.Writer) int {
 	st, err := (control.Client{Path: platform.SocketPath()}).Status()
 	if err != nil {
 		fmt.Fprintf(stderr, "status: cannot reach daemon: %v\n", err)
 		return 1
+	}
+	jsonOut := false
+	for _, a := range args {
+		if a == "--json" {
+			jsonOut = true
+		}
+	}
+	if jsonOut {
+		b, err := json.Marshal(st)
+		if err != nil {
+			fmt.Fprintf(stderr, "status: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "%s\n", b)
+		return 0
 	}
 	state := "disconnected"
 	if st.Running {

@@ -28,7 +28,7 @@ func dispatch(args []string, stdout, stderr io.Writer) int {
 	case "down":
 		return cmdDown(stdout, stderr)
 	case "status":
-		return cmdStatus(stdout, stderr)
+		return cmdStatus(args[1:], stdout, stderr)
 	case "daemon":
 		return cmdDaemon(stdout, stderr)
 	case "install":
