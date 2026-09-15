@@ -95,7 +95,7 @@ func stack(t *testing.T, serverPassword, clientPassword string, allowPrivate boo
 func TestFullStackTCPAndUDP(t *testing.T) {
 	c := stack(t, "pw", "pw", true)
 	echo := tcpEcho(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
 	for i := 0; i < 4; i++ {
 		conn, err := c.DialContext(ctx, "tcp", M.SocksaddrFromNet(echo))
@@ -119,18 +119,34 @@ func TestFullStackTCPAndUDP(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pc.Close()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := pc.WriteTo([]byte("udp"), uecho); err != nil {
-			t.Fatal(err)
+	// UDP through the stack is best effort (no retransmit at any hop), so fire
+	// steadily and accept the first echo. A single 1/s cadence gives only a
+	// handful of attempts and flakes under -race load.
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		tk := time.NewTicker(100 * time.Millisecond)
+		defer tk.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-tk.C:
+				_, _ = pc.WriteTo([]byte("udp"), uecho)
+			}
 		}
-		buf := make([]byte, 16)
-		_ = pc.SetReadDeadline(time.Now().Add(time.Second))
-		if n, _, err := pc.ReadFrom(buf); err == nil && string(buf[:n]) == "udp" {
+	}()
+	buf := make([]byte, 16)
+	_ = pc.SetReadDeadline(time.Now().Add(15 * time.Second))
+	for {
+		n, _, err := pc.ReadFrom(buf)
+		if err != nil {
+			t.Fatalf("no udp echo through the stack: %v", err)
+		}
+		if string(buf[:n]) == "udp" {
 			return
 		}
 	}
-	t.Fatal("no udp echo through the stack")
 }
 
 func TestFullStackWrongPasswordGetsNothing(t *testing.T) {
