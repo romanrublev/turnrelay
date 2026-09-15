@@ -27,11 +27,32 @@ func Build(p profile.Profile) ([]byte, error) {
 	if level == "" {
 		level = "info"
 	}
+
+	relay := map[string]any{
+		"type": "turnrelay", "tag": "relay",
+		"provider":    "vk",
+		"call_link":   p.Link,
+		"server":      host,
+		"server_port": port,
+		"connections": p.Connections,
+		"mode":        p.Mode,
+	}
+
+	// final is the outbound that carries all captured traffic: the WireGuard
+	// endpoint in the default transport, or the relay itself in exit mode. The
+	// remote DNS server tunnels through that same outbound.
+	final := "wg"
+	if p.IsExit() {
+		relay["server_type"] = "exit"
+		relay["password"] = p.Password
+		final = "relay"
+	}
+
 	cfg := map[string]any{
 		"log": map[string]any{"level": level},
 		"dns": map[string]any{
 			"servers": []any{
-				map[string]any{"type": "https", "tag": "remote", "server": "1.1.1.1", "detour": "wg"},
+				map[string]any{"type": "https", "tag": "remote", "server": "1.1.1.1", "detour": final},
 				map[string]any{"type": "local", "tag": "local"},
 			},
 			"final": "remote",
@@ -47,18 +68,24 @@ func Build(p profile.Profile) ([]byte, error) {
 			},
 		},
 		"outbounds": []any{
-			map[string]any{
-				"type": "turnrelay", "tag": "relay",
-				"provider":    "vk",
-				"call_link":   p.Link,
-				"server":      host,
-				"server_port": port,
-				"connections": p.Connections,
-				"mode":        p.Mode,
-			},
+			relay,
 			map[string]any{"type": "direct", "tag": "direct"},
 		},
-		"endpoints": []any{
+		"route": map[string]any{
+			"auto_detect_interface":   true,
+			"default_domain_resolver": map[string]any{"server": "local"},
+			"rules": []any{
+				map[string]any{"action": "sniff"},
+				map[string]any{"protocol": "dns", "action": "hijack-dns"},
+			},
+			"final": final,
+		},
+	}
+
+	// The WireGuard transport adds an endpoint that detours through the relay;
+	// exit mode needs no WireGuard at all.
+	if !p.IsExit() {
+		cfg["endpoints"] = []any{
 			map[string]any{
 				"type": "wireguard", "tag": "wg", "detour": "relay",
 				"system":      false,
@@ -73,16 +100,7 @@ func Build(p profile.Profile) ([]byte, error) {
 					},
 				},
 			},
-		},
-		"route": map[string]any{
-			"auto_detect_interface":   true,
-			"default_domain_resolver": map[string]any{"server": "local"},
-			"rules": []any{
-				map[string]any{"action": "sniff"},
-				map[string]any{"protocol": "dns", "action": "hijack-dns"},
-			},
-			"final": "wg",
-		},
+		}
 	}
 	return json.Marshal(cfg)
 }

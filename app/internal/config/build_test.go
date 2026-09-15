@@ -55,3 +55,31 @@ func TestBuildRejectsInvalidProfile(t *testing.T) {
 		t.Fatal("want error for empty profile")
 	}
 }
+
+func TestBuildExitMode(t *testing.T) {
+	p := sampleProfile()
+	p.ServerType = "exit"
+	p.Password = "secret"
+	b, err := Build(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	if _, hasEP := m["endpoints"]; hasEP {
+		t.Fatal("exit mode must not emit a wireguard endpoint")
+	}
+	relay := m["outbounds"].([]any)[0].(map[string]any)
+	if relay["server_type"] != "exit" || relay["password"] != "secret" {
+		t.Fatalf("relay exit fields wrong: %v", relay)
+	}
+	if m["route"].(map[string]any)["final"] != "relay" {
+		t.Fatalf("exit route.final should be relay")
+	}
+	dns0 := m["dns"].(map[string]any)["servers"].([]any)[0].(map[string]any)
+	if dns0["detour"] != "relay" {
+		t.Fatalf("exit remote dns detour should be relay, got %v", dns0["detour"])
+	}
+}
