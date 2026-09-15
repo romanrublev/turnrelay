@@ -16,6 +16,10 @@ type Profile struct {
 	WGPrivateKey    string `json:"wg_private_key"`
 	WGPeerPublicKey string `json:"wg_peer_public_key"`
 	WGAddress       string `json:"wg_address"`
+	// LogLevel is the sing-box log level (info by default). Set it to "debug"
+	// to make worker and handshake lines visible, which is also what the status
+	// worker count is parsed from.
+	LogLevel string `json:"log_level,omitempty"`
 }
 
 func Defaults() Profile {

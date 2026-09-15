@@ -23,8 +23,12 @@ func Build(p profile.Profile) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	level := p.LogLevel
+	if level == "" {
+		level = "info"
+	}
 	cfg := map[string]any{
-		"log": map[string]any{"level": "info"},
+		"log": map[string]any{"level": level},
 		"dns": map[string]any{
 			"servers": []any{
 				map[string]any{"type": "https", "tag": "remote", "server": "1.1.1.1", "detour": "wg"},
