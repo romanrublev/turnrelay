@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"reflect"
 	"sync"
 
 	"github.com/romanrublev/turnrelay"
@@ -18,6 +17,7 @@ import (
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
+	"github.com/sagernet/sing/service"
 )
 
 var (
@@ -86,13 +86,18 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 	}, nil
 }
 
-// dialHook wires the core library's socket dialer to sing-box's, so detour and
-// bind_interface apply to the sockets towards the VK API and the relay. It is
-// built only when DialerOptions is set: dialer.New reads runtime managers from
-// the context and cannot run on a context without a box, and an unset
-// DialerOptions has nothing to apply, so the core library dials directly.
+// dialHook wires the core library's socket dialer to sing-box's, so that every
+// socket the library opens (the VK API and the TURN relays) goes through
+// sing-box's dialer. This is what makes route.auto_detect_interface (and any
+// detour / bind_interface) apply to those sockets, so they bind to the physical
+// interface and bypass sing-box's own tun instead of looping back into it.
+//
+// It is built whenever a network manager is present in the context, i.e. when
+// running under a real box. dialer.New reads runtime managers from the context
+// and cannot run without them, so a bare unit test context (no network manager)
+// gets a nil hook and the core library dials directly.
 func dialHook(ctx context.Context, options option.DialerOptions) (func(context.Context, string, string) (net.Conn, error), error) {
-	if reflect.DeepEqual(options, option.DialerOptions{}) {
+	if service.FromContext[adapter.NetworkManager](ctx) == nil {
 		return nil, nil
 	}
 	sbDialer, err := dialer.New(ctx, options, true)
