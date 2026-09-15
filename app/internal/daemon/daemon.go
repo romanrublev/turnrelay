@@ -15,15 +15,45 @@ import (
 )
 
 type Daemon struct {
-	eng    *engine.Engine
+	eng *engine.Engine
+
+	// opMu serializes Up and Down as whole operations, so a concurrent
+	// Up/Up or Up/Down pair cannot interleave and leak or race the poll
+	// goroutine below.
+	opMu sync.Mutex
+
+	// mu guards the fields below, which are also read by Status and
+	// written by the egress-poll goroutine.
 	mu     sync.Mutex
 	egress string
 	poll   context.CancelFunc
+	done   chan struct{}
+
+	// fetchEgress is a seam over egressOnce so tests can drive the poll
+	// loop without a real network call or a running engine.
+	fetchEgress func(context.Context) string
 }
 
-func New() *Daemon { return &Daemon{eng: engine.New()} }
+func New() *Daemon {
+	d := &Daemon{eng: engine.New()}
+	d.fetchEgress = d.egressOnce
+	return d
+}
 
 func (d *Daemon) Up(p profile.Profile) error {
+	d.opMu.Lock()
+	defer d.opMu.Unlock()
+
+	d.mu.Lock()
+	active := d.poll != nil
+	d.mu.Unlock()
+	if active {
+		// Already up: engine.Start is idempotent, but launching a second
+		// poll goroutine here would discard the existing CancelFunc and
+		// leak the first poll. Treat Up as idempotent too.
+		return nil
+	}
+
 	cfg, err := config.Build(p)
 	if err != nil {
 		return err
@@ -32,21 +62,40 @@ func (d *Daemon) Up(p profile.Profile) error {
 		return err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
 	d.mu.Lock()
 	d.poll = cancel
+	d.done = done
 	d.mu.Unlock()
-	go d.egressLoop(ctx)
+	go d.egressLoop(ctx, done)
 	return nil
 }
 
 func (d *Daemon) Down() error {
+	d.opMu.Lock()
+	defer d.opMu.Unlock()
+
 	d.mu.Lock()
-	if d.poll != nil {
-		d.poll()
-		d.poll = nil
+	cancel := d.poll
+	done := d.done
+	d.poll = nil
+	d.done = nil
+	d.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
 	}
+	if done != nil {
+		// Wait for the poll goroutine to actually exit before clearing
+		// egress below, otherwise a write already in flight can land
+		// after we clear it and leave a stale IP in Status.
+		<-done
+	}
+
+	d.mu.Lock()
 	d.egress = ""
 	d.mu.Unlock()
+
 	d.eng.Stop()
 	return nil
 }
@@ -63,11 +112,12 @@ func (d *Daemon) Status() proto.Status {
 	}
 }
 
-func (d *Daemon) egressLoop(ctx context.Context) {
+func (d *Daemon) egressLoop(ctx context.Context, done chan struct{}) {
+	defer close(done)
 	t := time.NewTicker(15 * time.Second)
 	defer t.Stop()
 	set := func() {
-		ip := d.egressOnce(ctx)
+		ip := d.fetchEgress(ctx)
 		d.mu.Lock()
 		d.egress = ip
 		d.mu.Unlock()
