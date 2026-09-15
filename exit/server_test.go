@@ -2,10 +2,12 @@ package exit
 
 import (
 	"context"
+	"errors"
 	"io"
 	"math/rand/v2"
 	"net"
 	"net/netip"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -231,5 +233,100 @@ func TestServerStopsOnCtxCancel(t *testing.T) {
 	_ = d.UDP().SetReadDeadline(time.Now().Add(300 * time.Millisecond))
 	if n, _, err := d.UDP().ReadFrom(buf); err == nil {
 		t.Fatalf("got %d bytes after Serve stopped on ctx cancel, want nothing", n)
+	}
+}
+
+// TestServerUDPNoHeadOfLineBlocking: a datagram to a slow-resolving FQDN on
+// one association must not stall UDP for a second association pointing at a
+// literal IP. With the resolve done off the shared read loop, the fast
+// association gets its echo while the slow one is still blocked in DNS.
+func TestServerUDPNoHeadOfLineBlocking(t *testing.T) {
+	echo := udpEcho(t)
+	echoAP := netip.MustParseAddrPort(echo.String())
+	release := make(chan struct{})
+	resolver := func(ctx context.Context, host string) ([]netip.Addr, error) {
+		if host == "slow.invalid" {
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+			return nil, errors.New("slow: gave up")
+		}
+		return nil, errors.New("unexpected host " + host)
+	}
+	server := startServer(t, ServerOptions{AllowPrivate: true, Resolver: resolver, DialTimeout: 30 * time.Second})
+	_, d := rawClient(t, server)
+
+	slowFrame, err := EncodeUDPFrame(1, M.ParseSocksaddrHostPort("slow.invalid", 9999), []byte("slow"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.UDP().WriteTo(slowFrame, server); err != nil {
+		t.Fatal(err)
+	}
+	fastFrame, err := EncodeUDPFrame(2, M.SocksaddrFromNet(echo), []byte("fast"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.UDP().WriteTo(fastFrame, server); err != nil {
+		t.Fatal(err)
+	}
+
+	buf := make([]byte, 128)
+	_ = d.UDP().SetReadDeadline(time.Now().Add(3 * time.Second))
+	n, _, err := d.UDP().ReadFrom(buf)
+	if err != nil {
+		close(release)
+		t.Fatalf("fast association got no reply while the slow one blocked: %v", err)
+	}
+	assoc, from, payload, err := DecodeUDPFrame(buf[:n])
+	if err != nil || assoc != 2 || string(payload) != "fast" {
+		close(release)
+		t.Fatalf("reply assoc=%d payload=%q err=%v", assoc, payload, err)
+	}
+	if from.Port != echoAP.Port() {
+		close(release)
+		t.Fatalf("reply source %s, want the echo port", from)
+	}
+	close(release)
+}
+
+// TestServerUDPCachesResolvedDestination: repeated datagrams to the same FQDN
+// destination on one association resolve it once, not per datagram.
+func TestServerUDPCachesResolvedDestination(t *testing.T) {
+	echo := udpEcho(t)
+	echoAP := netip.MustParseAddrPort(echo.String())
+	var calls atomic.Int32
+	resolver := func(ctx context.Context, host string) ([]netip.Addr, error) {
+		if host == "echo.test" {
+			calls.Add(1)
+			return []netip.Addr{echoAP.Addr()}, nil
+		}
+		return nil, errors.New("unexpected host " + host)
+	}
+	server := startServer(t, ServerOptions{AllowPrivate: true, Resolver: resolver})
+	_, d := rawClient(t, server)
+	dest := M.ParseSocksaddrHostPort("echo.test", echoAP.Port())
+	for i := 0; i < 5; i++ {
+		frame, err := EncodeUDPFrame(9, dest, []byte{byte(i)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := d.UDP().WriteTo(frame, server); err != nil {
+			t.Fatal(err)
+		}
+		buf := make([]byte, 64)
+		_ = d.UDP().SetReadDeadline(time.Now().Add(3 * time.Second))
+		n, _, err := d.UDP().ReadFrom(buf)
+		if err != nil {
+			t.Fatalf("i=%d: %v", i, err)
+		}
+		_, _, payload, err := DecodeUDPFrame(buf[:n])
+		if err != nil || len(payload) != 1 || payload[0] != byte(i) {
+			t.Fatalf("i=%d payload=%v err=%v", i, payload, err)
+		}
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("resolver called %d times, want 1 (cached)", got)
 	}
 }

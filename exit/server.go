@@ -24,7 +24,11 @@ type ServerOptions struct {
 	AllowPrivate bool          // serve private/loopback/link-local destinations
 	Bind         string        // optional local address for outbound sockets
 	UDPTimeout   time.Duration // idle timeout per UDP association, default 60s
-	Logf         func(string, ...any)
+	// Resolver resolves an FQDN destination to IPs. nil uses the system
+	// resolver. It runs off the shared UDP read loop (per association), so a
+	// slow lookup stalls only its own association, never other sessions.
+	Resolver func(ctx context.Context, host string) ([]netip.Addr, error)
+	Logf     func(string, ...any)
 }
 
 func (o *ServerOptions) defaults() {
@@ -36,6 +40,11 @@ func (o *ServerOptions) defaults() {
 	}
 	if o.UDPTimeout == 0 {
 		o.UDPTimeout = 60 * time.Second
+	}
+	if o.Resolver == nil {
+		o.Resolver = func(ctx context.Context, host string) ([]netip.Addr, error) {
+			return net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+		}
 	}
 	if o.Logf == nil {
 		o.Logf = func(string, ...any) {}
@@ -56,11 +65,53 @@ type Server struct {
 	closed chan struct{}
 }
 
+// maxAssocCache bounds the per-association resolve cache so a client naming
+// many distinct destinations cannot grow it without limit.
+const maxAssocCache = 512
+
+type udpItem struct {
+	dest    M.Socksaddr
+	payload []byte
+}
+
 type assoc struct {
-	peer net.Addr
-	id   uint16
-	pc   net.PacketConn
-	last atomic.Int64
+	peer  net.Addr
+	id    uint16
+	pc    net.PacketConn
+	last  atomic.Int64
+	out   chan udpItem              // datagrams awaiting resolve and forward
+	cache map[string]netip.AddrPort // dest.String() -> checked target; only the send goroutine touches it
+	done  chan struct{}
+	once  sync.Once
+}
+
+// stop closes the association's socket and signals its goroutines to exit,
+// exactly once.
+func (a *assoc) stop() {
+	a.once.Do(func() {
+		close(a.done)
+		_ = a.pc.Close()
+	})
+}
+
+// target resolves and policy-checks a destination, caching the result per
+// association so repeat datagrams to the same destination skip DNS. Only the
+// association's send goroutine calls it, so the cache needs no lock.
+func (a *assoc) target(ctx context.Context, s *Server, dest M.Socksaddr) (netip.AddrPort, error) {
+	key := dest.String()
+	if t, ok := a.cache[key]; ok {
+		return t, nil
+	}
+	rctx, cancel := context.WithTimeout(ctx, s.o.DialTimeout)
+	defer cancel()
+	t, err := s.resolveChecked(rctx, dest)
+	if err != nil {
+		return netip.AddrPort{}, err
+	}
+	if len(a.cache) < maxAssocCache {
+		a.cache[key] = t
+	}
+	return t, nil
 }
 
 func NewServer(pc net.PacketConn, o ServerOptions) *Server {
@@ -80,7 +131,7 @@ func (s *Server) Close() error {
 		_ = s.demux.Close()
 		s.amu.Lock()
 		for _, a := range s.assocs {
-			_ = a.pc.Close()
+			a.stop()
 		}
 		s.amu.Unlock()
 	})
@@ -178,7 +229,7 @@ func (s *Server) resolveChecked(ctx context.Context, dest M.Socksaddr) (netip.Ad
 	var ips []netip.Addr
 	if dest.IsFqdn() {
 		var err error
-		ips, err = net.DefaultResolver.LookupNetIP(ctx, "ip", dest.Fqdn)
+		ips, err = s.o.Resolver(ctx, dest.Fqdn)
 		if err != nil {
 			return netip.AddrPort{}, err
 		}
@@ -216,16 +267,21 @@ func (s *Server) serveUDP(ctx context.Context) {
 		if err != nil {
 			continue
 		}
-		target, err := s.resolveChecked(ctx, dest)
-		if err != nil {
-			continue
-		}
 		a, err := s.assocFor(ctx, peer, id, udp)
 		if err != nil {
 			continue
 		}
 		a.last.Store(time.Now().UnixNano())
-		_, _ = a.pc.WriteTo(payload, net.UDPAddrFromAddrPort(target))
+		// Resolve and forward run in the association's own goroutine, so a
+		// slow DNS lookup stalls only this association, never other sessions.
+		// The payload is copied off the shared read buffer, then handed over
+		// without blocking (drop under backpressure, datagram semantics).
+		pkt := make([]byte, len(payload))
+		copy(pkt, payload)
+		select {
+		case a.out <- udpItem{dest: dest, payload: pkt}:
+		default:
+		}
 	}
 }
 
@@ -248,9 +304,10 @@ func (s *Server) assocFor(ctx context.Context, peer net.Addr, id uint16, udp net
 	if err != nil {
 		return nil, err
 	}
-	a := &assoc{peer: peer, id: id, pc: pc}
+	a := &assoc{peer: peer, id: id, pc: pc, out: make(chan udpItem, 256), cache: map[string]netip.AddrPort{}, done: make(chan struct{})}
 	a.last.Store(time.Now().UnixNano())
 	s.assocs[key] = a
+	// reply reader: datagrams from the outbound socket back to the client
 	go func() {
 		rb := make([]byte, 65535)
 		for {
@@ -264,6 +321,25 @@ func (s *Server) assocFor(ctx context.Context, peer net.Addr, id uint16, udp net
 			}
 			a.last.Store(time.Now().UnixNano())
 			_, _ = udp.WriteTo(frame, peer)
+		}
+	}()
+	// sender: resolve (off the shared read loop, with a per-association cache)
+	// and forward each queued datagram
+	go func() {
+		for {
+			select {
+			case <-a.done:
+				return
+			case <-s.closed:
+				return
+			case it := <-a.out:
+				target, err := a.target(ctx, s, it.dest)
+				if err != nil {
+					continue
+				}
+				a.last.Store(time.Now().UnixNano())
+				_, _ = a.pc.WriteTo(it.payload, net.UDPAddrFromAddrPort(target))
+			}
 		}
 	}()
 	return a, nil
@@ -282,7 +358,7 @@ func (s *Server) reapAssocs(ctx context.Context) {
 			s.amu.Lock()
 			for key, a := range s.assocs {
 				if now.UnixNano()-a.last.Load() > int64(s.o.UDPTimeout) {
-					_ = a.pc.Close()
+					a.stop()
 					delete(s.assocs, key)
 				}
 			}
