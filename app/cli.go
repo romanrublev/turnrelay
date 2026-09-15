@@ -89,11 +89,37 @@ func bytesTrim(b []byte) []byte {
 }
 
 func cmdInstall(stderr io.Writer) int {
-	fmt.Fprintln(stderr, "not yet")
-	return 1
+	if os.Geteuid() != 0 {
+		fmt.Fprintln(stderr, "install: must run as root (use sudo)")
+		return 1
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		fmt.Fprintf(stderr, "install: exec path: %v\n", err)
+		return 1
+	}
+	owner := uint32(os.Getuid())
+	if s := os.Getenv("SUDO_UID"); s != "" {
+		if n, err := strconv.ParseUint(s, 10, 32); err == nil {
+			owner = uint32(n)
+		}
+	}
+	if err := platform.Install(exe, owner); err != nil {
+		fmt.Fprintf(stderr, "install: %v\n", err)
+		return 1
+	}
+	fmt.Fprintln(stderr, "installed; owner uid", owner)
+	return 0
 }
 
 func cmdUninstall(stderr io.Writer) int {
-	fmt.Fprintln(stderr, "not yet")
-	return 1
+	if os.Geteuid() != 0 {
+		fmt.Fprintln(stderr, "uninstall: must run as root (use sudo)")
+		return 1
+	}
+	if err := platform.Uninstall(); err != nil {
+		fmt.Fprintf(stderr, "uninstall: %v\n", err)
+		return 1
+	}
+	return 0
 }
