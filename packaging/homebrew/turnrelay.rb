@@ -1,23 +1,32 @@
 class Turnrelay < Formula
   desc "Tunnel UDP through WebRTC TURN relays as a system VPN"
   homepage "https://github.com/romanrublev/turnrelay"
+  version "0.3.0-beta"
   license "GPL-3.0-or-later"
-  head "https://github.com/romanrublev/turnrelay.git", branch: "main"
 
-  # For a tagged release, replace `head` above (or add alongside) with:
-  #   url "https://github.com/romanrublev/turnrelay/archive/refs/tags/v0.3.0.tar.gz"
-  #   sha256 "<shasum -a 256 of the tarball>"
+  # Prebuilt binary for Apple Silicon: `brew install` pours it, no build and no
+  # sandbox to disable. Other platforms (and `brew install --HEAD`) build from
+  # source, which fetches Go modules and so needs `HOMEBREW_NO_SANDBOX=1`.
+  head "https://github.com/romanrublev/turnrelay.git", branch: "main"
 
   depends_on "go" => :build
 
+  on_macos do
+    on_arm do
+      url "https://github.com/romanrublev/turnrelay/releases/download/v0.3.0-beta/turnrelay-darwin-arm64.tar.gz"
+      sha256 "ad2a7a7b723ff5a1a0f74d413eba8e46264051485171d432e0d961b79d48594d"
+    end
+  end
+
   def install
-    # The command lives in the nested app/ module; its go.mod replaces the core
-    # and singbox modules with ../ and ../singbox, which resolve inside the
-    # checked-out repo. Build with the transport tags the engine needs.
-    cd "app" do
-      system "go", "build",
-             "-tags", "with_wireguard,with_gvisor,with_quic",
-             "-trimpath", "-o", bin/"turnrelay", "."
+    if build.head?
+      cd "app" do
+        system "go", "build",
+               "-tags", "with_wireguard,with_gvisor,with_quic",
+               "-trimpath", "-o", bin/"turnrelay", "."
+      end
+    else
+      bin.install "turnrelay"
     end
   end
 
