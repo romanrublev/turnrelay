@@ -82,12 +82,12 @@ func TestTierControllerHysteresisDown(t *testing.T) {
 	if c.cur != fecTierHeavy {
 		t.Fatalf("setup: want Heavy, got %d", c.cur)
 	}
-	// loss between downHeavy(0.05) and downMild is ambiguous; use a value that
-	// drops Heavy->Mild but not below downMild, so it should stop at Mild.
-	if tier, _ := c.update(0.03, t0); tier != fecTierMild {
-		t.Fatalf("Heavy should drop to Mild at loss 0.03, got %d", tier)
+	// loss below downHeavy(0.015) but above downMild(0.002) drops Heavy->Mild
+	// and should stop at Mild.
+	if tier, _ := c.update(0.01, t0); tier != fecTierMild {
+		t.Fatalf("Heavy should drop to Mild at loss 0.01, got %d", tier)
 	}
-	// now clean -> below downMild(0.01) drops Mild->Clean
+	// now below downMild(0.002) drops Mild->Clean
 	if tier, _ := c.update(0.0, t0); tier != fecTierClean {
 		t.Fatalf("Mild should drop to Clean at loss 0, got %d", tier)
 	}

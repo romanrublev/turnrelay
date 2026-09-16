@@ -111,8 +111,8 @@ type tierController struct {
 func newTierController(dwell time.Duration) *tierController {
 	return &tierController{
 		dwell:    dwell,
-		upMild:   0.02, downMild: 0.01,
-		upHeavy: 0.08, downHeavy: 0.05,
+		upMild:   0.005, downMild: 0.002,
+		upHeavy: 0.03, downHeavy: 0.015,
 	}
 }
 
