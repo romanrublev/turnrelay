@@ -24,7 +24,7 @@ const (
 func tuneKCP(s *kcp.UDPSession) {
 	s.SetNoDelay(1, 20, 2, 1)
 	s.SetWindowSize(1024, 1024)
-	s.SetMtu(1200)
+	s.SetMtu(1196) // pipe wraps each KCP packet with a 1-byte kind + 4-byte seq
 	s.SetACKNoDelay(true)
 	s.SetStreamMode(true)
 }

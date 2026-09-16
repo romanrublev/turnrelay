@@ -19,7 +19,9 @@ func TestDemuxRoutesByKind(t *testing.T) {
 	d := NewDemux(server)
 	defer d.Close()
 
-	for _, raw := range [][]byte{{KindKCP, 'k', '1'}, {KindUDP, 'u', '1'}, {0x07, 'x'}, {KindKCP, 'k', '2'}} {
+	// KCP-side frames carry a 4-byte sequence after the discriminator; UDP and
+	// unknown kinds do not.
+	for _, raw := range [][]byte{{KindKCP, 0, 0, 0, 0, 'k', '1'}, {KindUDP, 'u', '1'}, {0x07, 'x'}, {KindKCP, 0, 0, 0, 1, 'k', '2'}} {
 		if _, err := client.WriteTo(raw, server.LocalAddr()); err != nil {
 			t.Fatal(err)
 		}

@@ -1,9 +1,11 @@
 package exit
 
 import (
+	"encoding/binary"
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pion/transport/v4/deadline"
@@ -14,11 +16,13 @@ import (
 // the session address on the server). Both sides write through the same
 // underlying conn and prepend their own discriminator.
 type Demux struct {
-	pc   net.PacketConn
-	kcp  *sideConn
-	udp  *sideConn
-	done chan struct{}
-	once sync.Once
+	pc      net.PacketConn
+	kcp     *sideConn
+	udp     *sideConn
+	done    chan struct{}
+	once    sync.Once
+	sendSeq atomic.Uint32  // per-datagram sequence for KCP-side frames we send
+	est     *lossEstimator // loss estimate from the KCP-side sequence we receive
 }
 
 type packet struct {
@@ -34,7 +38,7 @@ type sideConn struct {
 }
 
 func NewDemux(pc net.PacketConn) *Demux {
-	d := &Demux{pc: pc, done: make(chan struct{})}
+	d := &Demux{pc: pc, done: make(chan struct{}), est: newLossEstimator(256, 0.3)}
 	d.kcp = &sideConn{d: d, kind: KindKCP, in: make(chan packet, 1024), dl: deadline.New()}
 	d.udp = &sideConn{d: d, kind: KindUDP, in: make(chan packet, 1024), dl: deadline.New()}
 	go d.loop()
@@ -56,16 +60,25 @@ func (d *Demux) loop() {
 			continue
 		}
 		var side *sideConn
+		var pkt []byte
 		switch buf[0] {
 		case KindKCP:
+			// KCP-side frames carry a 4-byte sequence after the discriminator,
+			// used only to estimate the pipe's loss rate; it is stripped here.
+			if n < 5 {
+				continue
+			}
+			d.est.observe(binary.BigEndian.Uint32(buf[1:5]))
 			side = d.kcp
+			pkt = make([]byte, n-5)
+			copy(pkt, buf[5:n])
 		case KindUDP:
 			side = d.udp
+			pkt = make([]byte, n-1)
+			copy(pkt, buf[1:n])
 		default:
 			continue
 		}
-		pkt := make([]byte, n-1)
-		copy(pkt, buf[1:n])
 		select {
 		case side.in <- packet{b: pkt, addr: addr}:
 		case <-d.done:
@@ -96,14 +109,26 @@ func (s *sideConn) ReadFrom(b []byte) (int, net.Addr, error) {
 }
 
 func (s *sideConn) WriteTo(b []byte, addr net.Addr) (int, error) {
-	out := make([]byte, len(b)+1)
-	out[0] = s.kind
-	copy(out[1:], b)
+	var out []byte
+	if s.kind == KindKCP {
+		out = make([]byte, len(b)+5)
+		out[0] = s.kind
+		binary.BigEndian.PutUint32(out[1:5], s.d.sendSeq.Add(1)-1)
+		copy(out[5:], b)
+	} else {
+		out = make([]byte, len(b)+1)
+		out[0] = s.kind
+		copy(out[1:], b)
+	}
 	if _, err := s.d.pc.WriteTo(out, addr); err != nil {
 		return 0, err
 	}
 	return len(b), nil
 }
+
+// LossRate is the smoothed loss estimate of the incoming KCP-side pipe, in
+// [0,1], derived from gaps in the received sequence numbers.
+func (d *Demux) LossRate() float64 { return d.est.rate() }
 
 func (s *sideConn) Close() error                      { return s.d.Close() }
 func (s *sideConn) LocalAddr() net.Addr               { return s.d.pc.LocalAddr() }
