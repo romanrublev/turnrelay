@@ -28,10 +28,16 @@ func LaunchdPlist(execPath string) string {
 }
 
 func Install(execPath string, ownerUID uint32) error {
+	// Copy the binary to a root-owned path and point launchd at that, not at
+	// the (possibly user-writable) binary the admin ran. See installBinary.
+	installed, err := installBinary(execPath)
+	if err != nil {
+		return err
+	}
 	if err := os.WriteFile(OwnerUIDPath(), []byte(strconv.FormatUint(uint64(ownerUID), 10)), 0o644); err != nil {
 		return err
 	}
-	if err := os.WriteFile(launchdPlistPath, []byte(LaunchdPlist(execPath)), 0o644); err != nil {
+	if err := os.WriteFile(launchdPlistPath, []byte(LaunchdPlist(installed)), 0o644); err != nil {
 		return err
 	}
 	return exec.Command("launchctl", "bootstrap", "system", launchdPlistPath).Run()
@@ -41,5 +47,6 @@ func Uninstall() error {
 	_ = exec.Command("launchctl", "bootout", "system/"+launchdLabel).Run()
 	_ = os.Remove(launchdPlistPath)
 	_ = os.Remove(OwnerUIDPath())
+	_ = os.Remove(InstalledBinaryPath())
 	return nil
 }

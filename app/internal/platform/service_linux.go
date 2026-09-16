@@ -30,13 +30,19 @@ WantedBy=multi-user.target
 }
 
 func Install(execPath string, ownerUID uint32) error {
+	// Copy the binary to a root-owned path and point systemd at that, not at
+	// the (possibly user-writable) binary the admin ran. See installBinary.
+	installed, err := installBinary(execPath)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(OwnerUIDPath()), 0o755); err != nil {
 		return err
 	}
 	if err := os.WriteFile(OwnerUIDPath(), []byte(strconv.FormatUint(uint64(ownerUID), 10)), 0o644); err != nil {
 		return err
 	}
-	if err := os.WriteFile(systemdUnitPath, []byte(SystemdUnit(execPath)), 0o644); err != nil {
+	if err := os.WriteFile(systemdUnitPath, []byte(SystemdUnit(installed)), 0o644); err != nil {
 		return err
 	}
 	if err := exec.Command("systemctl", "daemon-reload").Run(); err != nil {
@@ -49,6 +55,7 @@ func Uninstall() error {
 	_ = exec.Command("systemctl", "disable", "--now", systemdUnitName).Run()
 	_ = os.Remove(systemdUnitPath)
 	_ = os.Remove(OwnerUIDPath())
+	_ = os.Remove(InstalledBinaryPath())
 	_ = exec.Command("systemctl", "daemon-reload").Run()
 	return nil
 }

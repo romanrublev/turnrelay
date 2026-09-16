@@ -23,6 +23,11 @@ type Options struct {
 	WrapKey          []byte // ModeWrap: raw 32-byte key
 	Video            bool   // ModeWrap: PT 96 / larger padding instead of PT 111
 	HandshakeTimeout time.Duration
+	// ServerFingerprint, when set, is the SHA-256 of the exit server's DTLS
+	// leaf certificate (see CertFingerprint). The client verifies the server
+	// against it, authenticating the server and stopping an on-path MITM.
+	// Empty keeps the legacy unauthenticated behaviour.
+	ServerFingerprint []byte
 }
 
 // Wrapper runs the mode's handshake over underlay towards peer and returns a
@@ -40,9 +45,9 @@ func New(mode Mode, o Options) (Wrapper, error) {
 	}
 	switch mode {
 	case ModeDTLS:
-		return &dtlsWrapper{timeout: o.HandshakeTimeout}, nil
+		return &dtlsWrapper{timeout: o.HandshakeTimeout, pin: o.ServerFingerprint}, nil
 	case ModeSRTP:
-		return &srtpWrapper{timeout: o.HandshakeTimeout}, nil
+		return &srtpWrapper{timeout: o.HandshakeTimeout, pin: o.ServerFingerprint}, nil
 	case ModeWrap:
 		key := o.WrapKey
 		if key == nil {
@@ -54,7 +59,7 @@ func New(mode Mode, o Options) (Wrapper, error) {
 		if len(key) != WrapKeyLen {
 			return nil, fmt.Errorf("obfs: wrap key must be %d bytes", WrapKeyLen)
 		}
-		return &wrapWrapper{key: key, video: o.Video, timeout: o.HandshakeTimeout}, nil
+		return &wrapWrapper{key: key, video: o.Video, timeout: o.HandshakeTimeout, pin: o.ServerFingerprint}, nil
 	default:
 		return nil, errors.New("obfs: unknown mode " + string(mode))
 	}

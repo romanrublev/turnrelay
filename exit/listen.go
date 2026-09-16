@@ -2,6 +2,7 @@ package exit
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"net"
 	"sync"
@@ -15,9 +16,13 @@ import (
 // obfuscation the relay-side sessions use, the pre-shared password, and the
 // exit policy.
 type ListenConfig struct {
-	Address     string
-	Mode        obfs.Mode
-	Password    string
+	Address  string
+	Mode     obfs.Mode
+	Password string
+	// Cert is the server's DTLS certificate. A persisted (stable) certificate
+	// has a stable obfs.CertFingerprint that clients pin; nil generates a fresh
+	// one each start, which cannot be pinned. See obfs.ListenOptions.Cert.
+	Cert        *tls.Certificate
 	Server      ServerOptions
 	ZombieAfter time.Duration
 	Logf        func(string, ...any)
@@ -60,7 +65,7 @@ func Listen(ctx context.Context, cfg ListenConfig) (*Instance, error) {
 	if cfg.Server.Logf == nil {
 		cfg.Server.Logf = cfg.Logf
 	}
-	l, err := obfs.Listen(cfg.Mode, cfg.Address, obfs.ListenOptions{Password: cfg.Password})
+	l, err := obfs.Listen(cfg.Mode, cfg.Address, obfs.ListenOptions{Password: cfg.Password, Cert: cfg.Cert})
 	if err != nil {
 		return nil, err
 	}

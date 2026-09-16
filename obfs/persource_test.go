@@ -37,7 +37,7 @@ func TestPerSourceCreatesOnceAndReaps(t *testing.T) {
 	go ps.reap(ctx)
 
 	creates := 0
-	mk := func() (func([]byte), bool) {
+	mk := func([]byte) (func([]byte), bool) {
 		creates++
 		return func([]byte) {}, true
 	}
@@ -69,7 +69,7 @@ func TestPerSourceDispatchNeverBlocks(t *testing.T) {
 	ps := newPerSource(time.Minute)
 	full := make(chan []byte, 1)
 	full <- []byte("x") // pre-filled so trySend always drops
-	mk := func() (func([]byte), bool) {
+	mk := func([]byte) (func([]byte), bool) {
 		return func(p []byte) { trySend(full, p) }, true
 	}
 	done := make(chan struct{})
@@ -83,5 +83,25 @@ func TestPerSourceDispatchNeverBlocks(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("dispatch blocked while the per-source channel was full")
+	}
+}
+
+// dispatch must not create an entry when newEntry rejects the first packet
+// (e.g. serveSRTP refusing a non-DTLS first byte), so a scan cannot populate
+// the map or spawn goroutines.
+func TestPerSourceRejectsWhenNewEntryDeclines(t *testing.T) {
+	ps := newPerSource(time.Minute)
+	calls := 0
+	mk := func(pkt []byte) (func([]byte), bool) {
+		calls++
+		return nil, false // decline: not a session-starting packet
+	}
+	ps.dispatch(time.Now(), "9.9.9.9:1", mk, []byte{0x00})
+	ps.dispatch(time.Now(), "9.9.9.9:1", mk, []byte{0x00})
+	if ps.len() != 0 {
+		t.Fatalf("declined source created an entry, len=%d", ps.len())
+	}
+	if calls != 2 {
+		t.Fatalf("newEntry called %d times, want 2 (retried each packet, never cached)", calls)
 	}
 }

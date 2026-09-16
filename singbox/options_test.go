@@ -76,3 +76,30 @@ func TestOptionsToConfigRejectsNonIPServer(t *testing.T) {
 		t.Fatal("a non-IP server must be rejected")
 	}
 }
+
+func TestOptionsServerFingerprint(t *testing.T) {
+	fp := "aa" + "bb" + "cc" + "dd" // build a 64-hex string
+	for len(fp) < 64 {
+		fp += "ee"
+	}
+	raw := `{"server":"203.0.113.5","server_port":56004,"server_type":"exit","password":"p","server_fingerprint":"` + fp + `"}`
+	var o TurnrelayOutboundOptions
+	if err := json.Unmarshal([]byte(raw), &o); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := o.toConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.ServerFingerprint) != 32 {
+		t.Fatalf("fingerprint len=%d, want 32", len(cfg.ServerFingerprint))
+	}
+
+	// A malformed fingerprint is rejected, not silently ignored.
+	bad := `{"server":"203.0.113.5","server_port":56004,"server_fingerprint":"xyz"}`
+	var o2 TurnrelayOutboundOptions
+	_ = json.Unmarshal([]byte(bad), &o2)
+	if _, err := o2.toConfig(); err == nil {
+		t.Fatal("bad server_fingerprint accepted")
+	}
+}

@@ -5,6 +5,7 @@ package obfstest
 
 import (
 	"context"
+	"crypto/tls"
 	"net"
 	"testing"
 
@@ -39,3 +40,9 @@ func ListenWrap(t *testing.T, key []byte) *Server {
 // ListenSRTP mirrors anton48's -srtp server: one UDP socket, sessions keyed
 // by source address, DTLS with use_srtp, then RTP/SRTP framed datagrams.
 func ListenSRTP(t *testing.T) *Server { return listen(t, obfs.ModeSRTP, obfs.ListenOptions{}) }
+
+// ListenSRTPCert is ListenSRTP with a caller-supplied stable certificate, so a
+// test can pin its CertFingerprint.
+func ListenSRTPCert(t *testing.T, cert *tls.Certificate) *Server {
+	return listen(t, obfs.ModeSRTP, obfs.ListenOptions{Cert: cert})
+}

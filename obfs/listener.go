@@ -31,6 +31,12 @@ type ListenOptions struct {
 	Password string
 	WrapKey  []byte
 	Video    bool
+	// Cert, when set, is the server's DTLS certificate. A stable certificate
+	// (persisted across restarts) has a stable CertFingerprint, which is what
+	// clients pin (see Options.ServerFingerprint). Nil generates a fresh
+	// self-signed certificate each start, whose fingerprint changes on restart
+	// and so cannot be pinned.
+	Cert *tls.Certificate
 }
 
 func (l *Listener) Addr() net.Addr { return l.addr }
@@ -50,8 +56,13 @@ func (l *Listener) Close() error {
 }
 
 func Listen(mode Mode, address string, o ListenOptions) (*Listener, error) {
-	cert, err := selfsign.GenerateSelfSigned()
-	if err != nil {
+	var (
+		cert tls.Certificate
+		err  error
+	)
+	if o.Cert != nil {
+		cert = *o.Cert
+	} else if cert, err = selfsign.GenerateSelfSigned(); err != nil {
 		return nil, err
 	}
 	switch mode {
@@ -105,7 +116,9 @@ func listenDTLS(address string, cert tls.Certificate) (*Listener, error) {
 			}
 			go func() {
 				dc := c.(*dtls.Conn)
-				if err := dc.HandshakeContext(ctx); err != nil {
+				hctx, cancel := context.WithTimeout(ctx, dtlsHandshakeTimeout)
+				defer cancel()
+				if err := dc.HandshakeContext(hctx); err != nil {
 					_ = dc.Close()
 					return
 				}
@@ -157,17 +170,19 @@ func serveWrap(ctx context.Context, raw net.PacketConn, cert tls.Certificate, ke
 		copy(pkt, buf[:n])
 
 		src := addr
-		ps.dispatch(time.Now(), addr.String(), func() (func([]byte), bool) {
+		srcKey := addr.String()
+		ps.dispatch(time.Now(), srcKey, func(_ []byte) (func([]byte), bool) {
 			ch := make(chan []byte, 64)
-			go acceptWrapSession(ctx, raw, src, cert, key, video, ch, out)
+			go acceptWrapSession(ctx, raw, src, cert, key, video, ch, out, ps, srcKey)
 			return func(p []byte) { trySend(ch, p) }, true
 		}, pkt)
 	}
 }
 
-func acceptWrapSession(ctx context.Context, raw net.PacketConn, src net.Addr, cert tls.Certificate, key []byte, video bool, pkts chan []byte, out chan<- net.Conn) {
+func acceptWrapSession(ctx context.Context, raw net.PacketConn, src net.Addr, cert tls.Certificate, key []byte, video bool, pkts chan []byte, out chan<- net.Conn, ps *perSource, srcKey string) {
 	codec, err := NewWrapCodec(key, video)
 	if err != nil {
+		ps.remove(srcKey)
 		return
 	}
 	// side delivers this source's raw packets (still WRAP-enveloped) and writes
@@ -177,10 +192,14 @@ func acceptWrapSession(ctx context.Context, raw net.PacketConn, src net.Addr, ce
 	pc := NewWrapPacketConn(side, codec)
 	dc, err := dtls.ServerWithOptions(pc, src, serverOptions(cert)...)
 	if err != nil {
+		ps.remove(srcKey)
 		return
 	}
-	if err := dc.HandshakeContext(ctx); err != nil {
+	hctx, cancel := context.WithTimeout(ctx, dtlsHandshakeTimeout)
+	defer cancel()
+	if err := dc.HandshakeContext(hctx); err != nil {
 		_ = dc.Close()
+		ps.remove(srcKey)
 		return
 	}
 	select {
@@ -212,6 +231,13 @@ func listenSRTP(address string, cert tls.Certificate) (*Listener, error) {
 // (mux ZombieAfter, 120s), so only sessions already dead upstream are reaped,
 // while roaming or NAT-rebinding sources cannot grow the map without bound.
 var srcSessionTTL = 5 * time.Minute
+
+// dtlsHandshakeTimeout bounds one server-side DTLS handshake. Without it a
+// source that sends a first packet and then goes silent (a port scan, a spoofed
+// address) would leave a goroutine and its DTLS state blocked on the listener's
+// lifetime context until the server exits. pion/dtls has no handshake timeout
+// of its own, so we impose one.
+var dtlsHandshakeTimeout = 20 * time.Second
 
 // trySend delivers a packet to a per-source channel without blocking: a full
 // channel drops the packet (DTLS retransmits its handshake and media payload
@@ -246,11 +272,11 @@ func newPerSource(ttl time.Duration) *perSource {
 // source (via newEntry) on first sight. newEntry returns (deliver, ok); ok
 // false means the source could not be set up, and the packet is dropped. The
 // delivery closure runs outside the lock and must not block.
-func (p *perSource) dispatch(now time.Time, key string, newEntry func() (func([]byte), bool), pkt []byte) {
+func (p *perSource) dispatch(now time.Time, key string, newEntry func(pkt []byte) (func([]byte), bool), pkt []byte) {
 	p.mu.Lock()
 	e, ok := p.sessions[key]
 	if !ok {
-		deliver, valid := newEntry()
+		deliver, valid := newEntry(pkt)
 		if !valid {
 			p.mu.Unlock()
 			return
@@ -262,6 +288,15 @@ func (p *perSource) dispatch(now time.Time, key string, newEntry func() (func([]
 	deliver := e.deliver
 	p.mu.Unlock()
 	deliver(pkt)
+}
+
+// remove drops a source entry, freeing its delivery channels. A handshake that
+// fails calls this so a dead session's buffers are released at once rather than
+// lingering until the reaper's TTL.
+func (p *perSource) remove(key string) {
+	p.mu.Lock()
+	delete(p.sessions, key)
+	p.mu.Unlock()
 }
 
 // reap drops sources with no packet for ttl until ctx ends.
@@ -320,9 +355,17 @@ func serveSRTP(ctx context.Context, raw net.PacketConn, opts []dtls.ServerOption
 		copy(pkt, buf[:n])
 
 		src := addr
-		ps.dispatch(time.Now(), addr.String(), func() (func([]byte), bool) {
+		key := addr.String()
+		ps.dispatch(time.Now(), key, func(first []byte) (func([]byte), bool) {
+			// Only a DTLS ClientHello starts a session. A packet whose first
+			// byte is not in the DTLS content-type range (a scan, a stray
+			// datagram, a spoofed probe) must not spin up a handshake goroutine
+			// and its channels.
+			if len(first) == 0 || !isDTLSByte(first[0]) {
+				return nil, false
+			}
 			sess := &srtpSession{dtlsCh: make(chan []byte, 64), rtpCh: make(chan []byte, 2048)}
-			go acceptSRTPSession(ctx, raw, src, opts, sess, out)
+			go acceptSRTPSession(ctx, raw, src, opts, sess, out, ps, key)
 			return func(p []byte) {
 				switch {
 				case isDTLSByte(p[0]):
@@ -335,19 +378,24 @@ func serveSRTP(ctx context.Context, raw net.PacketConn, opts []dtls.ServerOption
 	}
 }
 
-func acceptSRTPSession(ctx context.Context, raw net.PacketConn, src net.Addr, opts []dtls.ServerOption, sess *srtpSession, out chan<- net.Conn) {
+func acceptSRTPSession(ctx context.Context, raw net.PacketConn, src net.Addr, opts []dtls.ServerOption, sess *srtpSession, out chan<- net.Conn, ps *perSource, key string) {
 	side := &sessionConn{ctx: ctx, raw: raw, src: src, dtlsCh: sess.dtlsCh, dl: deadline.New()}
 	dc, err := dtls.ServerWithOptions(side, src, opts...)
 	if err != nil {
+		ps.remove(key)
 		return
 	}
-	if err := dc.HandshakeContext(ctx); err != nil {
+	hctx, cancel := context.WithTimeout(ctx, dtlsHandshakeTimeout)
+	defer cancel()
+	if err := dc.HandshakeContext(hctx); err != nil {
 		_ = dc.Close()
+		ps.remove(key)
 		return
 	}
 	c, err := NewSRTPServerConn(raw, src, dc, sess.rtpCh)
 	if err != nil {
 		_ = dc.Close()
+		ps.remove(key)
 		return
 	}
 	select {

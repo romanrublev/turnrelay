@@ -34,11 +34,14 @@ const (
 func isDTLSByte(b byte) bool { return b >= 20 && b <= 63 }
 func isRTPByte(b byte) bool  { return b >= 128 && b <= 191 }
 
-type srtpWrapper struct{ timeout time.Duration }
+type srtpWrapper struct {
+	timeout time.Duration
+	pin     []byte
+}
 
 func (w *srtpWrapper) Client(ctx context.Context, underlay net.PacketConn, peer net.Addr) (net.Conn, error) {
 	d := newDemux(underlay, peer)
-	dc, err := dtlsHandshake(ctx, d.dtlsSide(), peer, w.timeout,
+	dc, err := dtlsHandshake(ctx, d.dtlsSide(), peer, w.timeout, w.pin,
 		dtls.WithSRTPProtectionProfiles(dtls.SRTP_AES128_CM_HMAC_SHA1_80))
 	if err != nil {
 		d.Close()

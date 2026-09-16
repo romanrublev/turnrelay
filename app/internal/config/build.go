@@ -45,6 +45,9 @@ func Build(p profile.Profile) ([]byte, error) {
 	if p.IsExit() {
 		relay["server_type"] = "exit"
 		relay["password"] = p.Password
+		if p.ServerFingerprint != "" {
+			relay["server_fingerprint"] = p.ServerFingerprint
+		}
 		final = "relay"
 	}
 

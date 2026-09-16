@@ -63,6 +63,7 @@ type wrapWrapper struct {
 	key     []byte
 	video   bool
 	timeout time.Duration
+	pin     []byte
 }
 
 func (w *wrapWrapper) Client(ctx context.Context, underlay net.PacketConn, peer net.Addr) (net.Conn, error) {
@@ -71,5 +72,5 @@ func (w *wrapWrapper) Client(ctx context.Context, underlay net.PacketConn, peer 
 		return nil, err
 	}
 	pc := NewWrapPacketConn(&peerPacketConn{underlay, peer}, codec)
-	return dtlsHandshake(ctx, pc, peer, w.timeout)
+	return dtlsHandshake(ctx, pc, peer, w.timeout, w.pin)
 }

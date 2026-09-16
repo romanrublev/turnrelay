@@ -7,6 +7,10 @@ import (
 
 func SocketPath() string { return "/run/turnrelay/turnrelay.sock" }
 
+// InstalledBinaryPath is the root-owned location the daemon binary is copied to
+// on install; the systemd unit points here, never at the admin's own copy.
+func InstalledBinaryPath() string { return "/usr/local/lib/turnrelay/turnrelayd" }
+
 // OwnerUIDPath is under /etc, not /run: /run is a tmpfs cleared on reboot, and
 // the daemon (started at boot by systemd) reads the owner uid before it can
 // recreate its runtime dir, so the uid file must persist.

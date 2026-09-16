@@ -63,9 +63,14 @@ type Config struct {
 	Mode         Mode
 	Password     string
 	WrapKey      []byte
-	TURNUDP      *bool // nil means true
-	Captcha      CaptchaPolicy
-	Logf         func(string, ...any)
+	// ServerFingerprint, when set, is the SHA-256 of the exit server's DTLS
+	// certificate. The client pins it, authenticating the server against an
+	// on-path MITM (the TURN relay or a network attacker). Empty keeps the
+	// legacy unauthenticated DTLS. See obfs.Options.ServerFingerprint.
+	ServerFingerprint []byte
+	TURNUDP           *bool // nil means true
+	Captcha           CaptchaPolicy
+	Logf              func(string, ...any)
 	// DialContext, when set, opens every socket the library makes: the
 	// UDP (or TCP) socket of each worker towards the TURN relay, and for
 	// provider vk the TCP connections to the VK API. nil uses the net
@@ -161,7 +166,7 @@ func New(cfg Config) (*Dialer, error) {
 	if cfg.Mode == ModeDTLS {
 		cfg.Logf("turnrelay: mode dtls is deprecated: VK relays shape it to a few KB/s")
 	}
-	wrapper, err := obfs.New(cfg.Mode, obfs.Options{Password: cfg.Password, WrapKey: cfg.WrapKey})
+	wrapper, err := obfs.New(cfg.Mode, obfs.Options{Password: cfg.Password, WrapKey: cfg.WrapKey, ServerFingerprint: cfg.ServerFingerprint})
 	if err != nil {
 		return nil, fmt.Errorf("turnrelay: %w", err)
 	}

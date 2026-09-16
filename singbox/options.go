@@ -4,8 +4,10 @@
 package singbox
 
 import (
+	"encoding/hex"
 	"fmt"
 	"net/netip"
+	"strings"
 
 	"github.com/romanrublev/turnrelay"
 	"github.com/sagernet/sing-box/option"
@@ -40,6 +42,10 @@ type TurnrelayOutboundOptions struct {
 	// wireguard endpoint's detour; "exit" is turnrelay-server, which makes
 	// this outbound a normal TCP+UDP proxy outbound with no WireGuard.
 	ServerType string `json:"server_type,omitempty"`
+	// ServerFingerprint is the exit server's DTLS certificate SHA-256 as hex.
+	// When set, the client pins it and authenticates the server against an
+	// on-path MITM. Printed by turnrelay-server -cert at startup.
+	ServerFingerprint string `json:"server_fingerprint,omitempty"`
 }
 
 // toConfig translates the JSON options into a turnrelay.Config. It parses the
@@ -61,17 +67,27 @@ func (o *TurnrelayOutboundOptions) toConfig() (turnrelay.Config, error) {
 		server = netip.AddrPortFrom(addr, o.ServerPort)
 	}
 
+	var fp []byte
+	if o.ServerFingerprint != "" {
+		b, err := hex.DecodeString(strings.TrimSpace(o.ServerFingerprint))
+		if err != nil || len(b) != 32 {
+			return turnrelay.Config{}, fmt.Errorf("turnrelay: server_fingerprint must be 64 hex chars (SHA-256): %w", err)
+		}
+		fp = b
+	}
+
 	return turnrelay.Config{
-		Provider:     o.Provider,
-		CallLinks:    links,
-		TURNServer:   o.TURNServer,
-		TURNUsername: o.TURNUsername,
-		TURNPassword: o.TURNPassword,
-		Server:       server,
-		Connections:  o.Connections,
-		Mode:         turnrelay.Mode(o.Mode),
-		Password:     o.Password,
-		TURNUDP:      o.UDP,
-		Captcha:      turnrelay.CaptchaPolicy(o.Captcha),
+		Provider:          o.Provider,
+		CallLinks:         links,
+		TURNServer:        o.TURNServer,
+		TURNUsername:      o.TURNUsername,
+		TURNPassword:      o.TURNPassword,
+		Server:            server,
+		Connections:       o.Connections,
+		Mode:              turnrelay.Mode(o.Mode),
+		Password:          o.Password,
+		ServerFingerprint: fp,
+		TURNUDP:           o.UDP,
+		Captcha:           turnrelay.CaptchaPolicy(o.Captcha),
 	}, nil
 }

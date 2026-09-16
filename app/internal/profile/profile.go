@@ -22,6 +22,10 @@ type Profile struct {
 	ServerType string `json:"server_type,omitempty"`
 	// Password is the pre-shared exit-server password (server_type "exit").
 	Password string `json:"password,omitempty"`
+	// ServerFingerprint is the exit server's DTLS certificate SHA-256 (hex).
+	// When set, the client pins it and authenticates the server against an
+	// on-path MITM. Printed by turnrelay-server -cert. Optional.
+	ServerFingerprint string `json:"server_fingerprint,omitempty"`
 	// LogLevel is the sing-box log level (info by default). Set it to "debug"
 	// to make worker and handshake lines visible, which is also what the status
 	// worker count is parsed from.
