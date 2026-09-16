@@ -1,7 +1,7 @@
 class Turnrelay < Formula
   desc "Tunnel UDP through WebRTC TURN relays as a system VPN"
   homepage "https://github.com/romanrublev/turnrelay"
-  version "0.4.0-beta"
+  version "0.5.0-beta"
   license "GPL-3.0-or-later"
 
   # Prebuilt binary for Apple Silicon: `brew install` pours it, no build and no
@@ -13,8 +13,8 @@ class Turnrelay < Formula
 
   on_macos do
     on_arm do
-      url "https://github.com/romanrublev/turnrelay/releases/download/v0.4.0-beta/turnrelay-darwin-arm64.tar.gz"
-      sha256 "b3f53f7bc36d46fcce899ba32a0a7a1777334caed93b27bfe78257edb6ffeba3"
+      url "https://github.com/romanrublev/turnrelay/releases/download/v0.5.0-beta/turnrelay-darwin-arm64.tar.gz"
+      sha256 "32a2374c263a6908bea75fb74f64c43256d643f3e8411264ea8877cadec24b0f"
     end
   end
 
