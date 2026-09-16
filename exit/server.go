@@ -140,7 +140,9 @@ func (s *Server) Close() error {
 
 // Serve blocks until ctx ends or the pipe fails.
 func (s *Server) Serve(ctx context.Context) error {
-	ln, err := kcp.ServeConn(nil, fecDataShards, fecParityShards, s.demux.KCP())
+	// Adaptive block FEC wraps the pipe; kcp-go's own FEC is off (0,0).
+	pipe := newFECConn(s.demux.KCP(), s.demux.LossRate)
+	ln, err := kcp.ServeConn(nil, 0, 0, pipe)
 	if err != nil {
 		return err
 	}

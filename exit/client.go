@@ -90,7 +90,9 @@ func (c *Client) session() (*smux.Session, error) {
 		_ = c.ks.Close()
 		c.ks, c.sess = nil, nil
 	}
-	ks, err := kcp.NewConn3(rand.Uint32(), c.server, nil, fecDataShards, fecParityShards, c.demux.KCP())
+	// Adaptive block FEC wraps the pipe; kcp-go's own FEC is off (0,0).
+	pipe := newFECConn(c.demux.KCP(), c.demux.LossRate)
+	ks, err := kcp.NewConn3(rand.Uint32(), c.server, nil, 0, 0, pipe)
 	if err != nil {
 		return nil, err
 	}

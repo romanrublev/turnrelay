@@ -80,7 +80,7 @@ func rawClient(t *testing.T, server net.Addr) (*smux.Session, *Demux) {
 	}
 	d := NewDemux(pc)
 	t.Cleanup(func() { d.Close() })
-	ks, err := kcp.NewConn3(rand.Uint32(), server, nil, 0, 0, d.KCP())
+	ks, err := kcp.NewConn3(rand.Uint32(), server, nil, 0, 0, newFECConn(d.KCP(), d.LossRate))
 	if err != nil {
 		t.Fatal(err)
 	}

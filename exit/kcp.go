@@ -7,15 +7,8 @@ import (
 	"github.com/xtaci/smux"
 )
 
-// FEC (forward error correction) shard counts, used identically by both ends
-// (they are part of the KCP framing, so client and server MUST match). Reed-
-// Solomon over the relayed pipe recovers up to fecParityShards lost packets in
-// each block of (fecData+fecParity) without a retransmit, which is the point:
-// the VK TURN path shows variable 3-19% loss. Overhead is parity/(data+parity).
-const (
-	fecDataShards   = 10
-	fecParityShards = 3
-)
+// FEC is done by our own adaptive block layer (fecConn), not kcp-go, so the
+// KCP sessions are created with 0/0 shards. See fecconn.go / fecblock.go.
 
 // tuneKCP sets the parameters both ends use over the relayed, striped pipe:
 // fast retransmit, generous windows, a conservative MTU so a KCP packet plus
@@ -24,7 +17,9 @@ const (
 func tuneKCP(s *kcp.UDPSession) {
 	s.SetNoDelay(1, 20, 2, 1)
 	s.SetWindowSize(1024, 1024)
-	s.SetMtu(1196) // pipe wraps each KCP packet with a 1-byte kind + 4-byte seq
+	// The pipe wraps each KCP packet: demux kind(1)+seq(4) and the FEC frame
+	// header(7)+shard length prefix(2) = 14 bytes over the KCP payload.
+	s.SetMtu(1187)
 	s.SetACKNoDelay(true)
 	s.SetStreamMode(true)
 }
