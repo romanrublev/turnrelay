@@ -2,7 +2,9 @@ package credpool
 
 import (
 	"context"
+	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -122,4 +124,34 @@ func TestFailedRelayNilSafe(t *testing.T) {
 	p := New(f, cooldownOpts(c))
 	p.FailedRelay(nil)
 	p.FailedRelay(&Lease{})
+}
+
+// TestAcquireBacksOffWhenAllRelaysCooling: once the only reachable relay is
+// cooled, Acquire must return ErrRelayCooling after a single fetch, not loop
+// fetching a fresh VK credential every few seconds (the ban-footprint storm).
+func TestAcquireBacksOffWhenAllRelaysCooling(t *testing.T) {
+	c := &clk{t: time.Unix(1_000_000, 0)}
+	var fetches atomic.Int32
+	f := func(_ context.Context, link string) (provider.Credential, error) {
+		fetches.Add(1)
+		return provider.Credential{Username: link, Relays: []string{"only"}, Link: link}, nil
+	}
+	o := cooldownOpts(c)
+	o.Links = []string{"L1"} // one link, one relay: nowhere to escape a cooldown
+	p := New(f, o)
+
+	l0, err := p.Acquire(context.Background(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.FailedRelay(l0)
+	fetchesBefore := fetches.Load()
+
+	_, err = p.Acquire(context.Background(), 0)
+	if !errors.Is(err, ErrRelayCooling) {
+		t.Fatalf("want ErrRelayCooling while the only relay cools, got %v", err)
+	}
+	if extra := fetches.Load() - fetchesBefore; extra > 1 {
+		t.Fatalf("Acquire fetched %d fresh credentials while cooling; want at most 1 (no storm)", extra)
+	}
 }

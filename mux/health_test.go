@@ -123,3 +123,33 @@ func TestPickEvictNothingWrong(t *testing.T) {
 		t.Fatalf("pickEvict = %d, want -1 (all healthy)", got)
 	}
 }
+
+func TestPickEvictSkipsPathWideLoss(t *testing.T) {
+	cfg := evictConfig{minSamples: 4, keepActive: 1}
+	// Every worker loses about the same (~20%): the path is lossy, not one
+	// relay. No single worker is an outlier, so nothing should be evicted -
+	// evicting would just churn an equally lossy VK relay.
+	snaps := []healthSnapshot{
+		{id: 0, active: true, loss: 0.18, samples: 10, rtt: 50 * time.Millisecond},
+		{id: 1, active: true, loss: 0.20, samples: 10, rtt: 55 * time.Millisecond},
+		{id: 2, active: true, loss: 0.22, samples: 10, rtt: 60 * time.Millisecond},
+	}
+	if got := pickEvict(snaps, cfg); got != -1 {
+		t.Fatalf("pickEvict = %d, want -1 (path-wide loss, no outlier)", got)
+	}
+}
+
+func TestPickEvictStillDropsOutlierOnLossyPath(t *testing.T) {
+	cfg := evictConfig{minSamples: 4, keepActive: 1}
+	// A moderately lossy path (median ~10%) with one relay far worse (45%):
+	// the outlier is well above median*mult and must still be retired.
+	snaps := []healthSnapshot{
+		{id: 0, active: true, loss: 0.08, samples: 10},
+		{id: 1, active: true, loss: 0.10, samples: 10},
+		{id: 2, active: true, loss: 0.11, samples: 10},
+		{id: 3, active: true, loss: 0.45, samples: 10}, // outlier
+	}
+	if got := pickEvict(snaps, cfg); got != 3 {
+		t.Fatalf("pickEvict = %d, want 3 (outlier on a lossy path)", got)
+	}
+}

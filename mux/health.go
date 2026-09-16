@@ -44,11 +44,11 @@ type workerHealth struct {
 	rttAlpha    float64
 	lossAlpha   float64
 	timeout     time.Duration
-	active      bool                // worker currently in the active state
-	rtt         time.Duration       // smoothed round-trip time; 0 until first echo
-	loss        float64             // smoothed probe-loss fraction in [0,1]
-	samples     int                 // probe outcomes folded (echo or timeout)
-	lastAck     time.Time           // when the most recent echo arrived
+	active      bool                 // worker currently in the active state
+	rtt         time.Duration        // smoothed round-trip time; 0 until first echo
+	loss        float64              // smoothed probe-loss fraction in [0,1]
+	samples     int                  // probe outcomes folded (echo or timeout)
+	lastAck     time.Time            // when the most recent echo arrived
 	outstanding map[uint64]time.Time // seq -> send time, awaiting echo
 }
 
@@ -163,6 +163,14 @@ type evictConfig struct {
 	// or below this; a lossy path in hand beats none while a replacement
 	// allocates.
 	keepActive int
+	// lossOutlierMult: a loss-based eviction only fires when the worst
+	// worker's loss is at least this multiple of the median active loss.
+	// When the whole path is lossy (bad Wi-Fi, congested uplink) every worker
+	// loses about equally, so the worst is not an outlier and evicting it just
+	// churns a fresh VK relay that loses just as much; the FEC layer, not
+	// eviction, handles path-wide loss. A lone bad relay among healthy ones is
+	// far above the median and still gets retired.
+	lossOutlierMult float64
 }
 
 func (c *evictConfig) defaults() {
@@ -180,6 +188,9 @@ func (c *evictConfig) defaults() {
 	}
 	if c.keepActive == 0 {
 		c.keepActive = 1
+	}
+	if c.lossOutlierMult == 0 {
+		c.lossOutlierMult = 1.6
 	}
 }
 
@@ -206,6 +217,7 @@ func pickEvict(snaps []healthSnapshot, cfg evictConfig) int {
 	worst := -1
 	var worstLoss float64
 	var worstRTT time.Duration
+	worstByLoss := false
 	for _, s := range snaps {
 		if !s.active || s.samples < cfg.minSamples {
 			continue
@@ -222,9 +234,39 @@ func pickEvict(snaps []healthSnapshot, cfg evictConfig) int {
 			worst = s.id
 			worstLoss = s.loss
 			worstRTT = s.rtt
+			worstByLoss = lossBad
+		}
+	}
+	// Path-wide loss guard: if the winner was flagged for loss but is not an
+	// outlier against the median active loss, the whole path is lossy, not this
+	// one relay. Retiring it would just churn an equally lossy replacement, so
+	// leave it and let FEC absorb the loss.
+	if worst >= 0 && worstByLoss {
+		if med := medianActiveLoss(snaps, cfg.minSamples); worstLoss < med*cfg.lossOutlierMult {
+			return -1
 		}
 	}
 	return worst
+}
+
+// medianActiveLoss is the median smoothed loss over active workers with enough
+// samples to judge, or 0 when none qualify.
+func medianActiveLoss(snaps []healthSnapshot, minSamples int) float64 {
+	var losses []float64
+	for _, s := range snaps {
+		if s.active && s.samples >= minSamples {
+			losses = append(losses, s.loss)
+		}
+	}
+	if len(losses) == 0 {
+		return 0
+	}
+	for i := 1; i < len(losses); i++ {
+		for j := i; j > 0 && losses[j-1] > losses[j]; j-- {
+			losses[j-1], losses[j] = losses[j], losses[j-1]
+		}
+	}
+	return losses[len(losses)/2]
 }
 
 // medianActiveRTT is the median RTT over active workers that have an RTT

@@ -5,6 +5,7 @@ package credpool
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"sync"
@@ -15,6 +16,12 @@ import (
 )
 
 type Fetcher = provider.Fetcher
+
+// ErrRelayCooling is returned by Acquire when the only relays it can reach are
+// on a degraded cooldown (set via FailedRelay). It is retryable: the caller
+// should back off and try again once a cooldown expires, rather than spin up a
+// fresh VK call join for another equally lossy relay.
+var ErrRelayCooling = errors.New("credpool: all reachable relays cooling down")
 
 type Options struct {
 	Links           []string
@@ -29,10 +36,10 @@ type Options struct {
 	// effectively poisons its credential; the cooldown is keyed by relay URL
 	// and outlives a re-fetch, so a fresh credential that returns the same
 	// bad relay IP is skipped too.
-	RelayCooldown   time.Duration
-	Now             func() time.Time
-	Sleep           func(context.Context, time.Duration) error
-	Logf            func(string, ...any)
+	RelayCooldown time.Duration
+	Now           func() time.Time
+	Sleep         func(context.Context, time.Duration) error
+	Logf          func(string, ...any)
 }
 
 func (o *Options) defaults() {
@@ -120,7 +127,7 @@ type Pool struct {
 	mu        sync.Mutex
 	slots     map[int]*slot
 	badRelays map[string]time.Time // relay URL -> cooldown expiry
-	fetchMu   sync.Mutex // one fetch at a time
+	fetchMu   sync.Mutex           // one fetch at a time
 	lastFetch time.Time
 	captcha   time.Time
 	lastErr   error
@@ -222,6 +229,7 @@ func (p *Pool) borrow() (*Lease, bool) {
 
 func (p *Pool) Acquire(ctx context.Context, worker int) (*Lease, error) {
 	own := worker / p.o.ConnsPerSlot
+	fetched := false
 	for {
 		p.mu.Lock()
 		ownSlot := p.slots[own]
@@ -254,6 +262,16 @@ func (p *Pool) Acquire(ctx context.Context, worker int) (*Lease, error) {
 			return nil, fmt.Errorf("credpool: captcha cooldown until %s: %w", until.Format(time.Kitchen), &provider.CaptchaRequiredError{})
 		}
 		p.mu.Unlock()
+		if fetched {
+			// We already fetched a fresh credential this call and still cannot
+			// lease, and no captcha is blocking us: the relays we can reach are
+			// all on a degraded cooldown. Fetching yet another credential would
+			// be a new anonymous call join every few seconds (a ban footprint)
+			// for a relay that is just as likely to be cooling. Surface a
+			// retryable error so the worker backs off and a cooldown expires
+			// before the next attempt.
+			return nil, ErrRelayCooling
+		}
 		if err := p.fetchInto(ctx, own); err != nil {
 			// The fetch itself failed (captcha, quota, network...); before
 			// surfacing that, see whether another slot became usable while
@@ -267,6 +285,7 @@ func (p *Pool) Acquire(ctx context.Context, worker int) (*Lease, error) {
 			p.mu.Unlock()
 			return nil, err
 		}
+		fetched = true
 	}
 }
 

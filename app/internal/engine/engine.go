@@ -41,6 +41,8 @@ func (e *Engine) Start(configJSON []byte) error {
 	e.counters.Evictions.Store(0)
 	e.counters.MaxLossBp.Store(0)
 	e.counters.MeanRTTMs.Store(0)
+	e.counters.ActiveWorkers.Store(0)
+	e.counters.GaugeSeen.Store(false)
 
 	outboundRegistry := include.OutboundRegistry()
 	turnrelaybox.RegisterOutbound(outboundRegistry)
@@ -82,6 +84,8 @@ func (e *Engine) Stop() {
 	e.counters.Evictions.Store(0)
 	e.counters.MaxLossBp.Store(0)
 	e.counters.MeanRTTMs.Store(0)
+	e.counters.ActiveWorkers.Store(0)
+	e.counters.GaugeSeen.Store(false)
 }
 
 func (e *Engine) Running() bool {
@@ -90,7 +94,16 @@ func (e *Engine) Running() bool {
 	return e.instance != nil
 }
 
-func (e *Engine) Workers() int      { return int(e.counters.Workers.Load()) }
+// Workers reports the count of live active workers. Once the mux supervisor
+// has emitted a health gauge, that is the true active count; before the first
+// gauge (~the first half-minute) it falls back to the cumulative count of
+// "worker up" log lines, which only ever grows.
+func (e *Engine) Workers() int {
+	if e.counters.GaugeSeen.Load() {
+		return int(e.counters.ActiveWorkers.Load())
+	}
+	return int(e.counters.Workers.Load())
+}
 func (e *Engine) HandshakeOK() bool { return e.counters.HandshakeOK.Load() }
 func (e *Engine) Evictions() int    { return int(e.counters.Evictions.Load()) }
 func (e *Engine) MeanRTTMs() int    { return int(e.counters.MeanRTTMs.Load()) }

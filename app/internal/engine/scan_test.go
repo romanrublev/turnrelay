@@ -27,6 +27,12 @@ func TestScanHealthGauge(t *testing.T) {
 	var c Counters
 	// A gauge line as the mux supervisor emits it, with a sing-box log prefix.
 	scanLine("outbound/turnrelay[relay]: mux: health active=59 evictions=3 max_loss_bp=1850 mean_rtt_ms=142", &c)
+	if !c.GaugeSeen.Load() {
+		t.Fatal("GaugeSeen not set after a gauge line")
+	}
+	if c.ActiveWorkers.Load() != 59 {
+		t.Fatalf("active=%d, want 59", c.ActiveWorkers.Load())
+	}
 	if c.Evictions.Load() != 3 {
 		t.Fatalf("evictions=%d, want 3", c.Evictions.Load())
 	}

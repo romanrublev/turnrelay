@@ -28,11 +28,14 @@ type fecConn struct {
 	data   int           // data shards per block
 	flush  time.Duration // max time a partial block waits
 
-	mu    sync.Mutex
-	send  map[string]*fecSendBlock
-	saddr map[string]net.Addr
-	reasm map[string]*blockReassembler
-	nextB uint32
+	mu        sync.Mutex
+	send      map[string]*fecSendBlock
+	saddr     map[string]net.Addr
+	reasm     map[string]*blockReassembler
+	lastSeen  map[string]time.Time // per-peer last activity, for idle pruning
+	nextB     uint32
+	idle      time.Duration // prune a peer's block state after this long idle
+	lastPrune time.Time
 
 	deliv chan fecDelivered
 	done  chan struct{}
@@ -53,18 +56,20 @@ type fecDelivered struct {
 
 func newFECConn(inner net.PacketConn, lossFn func() float64) *fecConn {
 	c := &fecConn{
-		inner:  inner,
-		codec:  newFECCodec(),
-		ctrl:   newTierController(5 * time.Second),
-		lossFn: lossFn,
-		data:   10,
-		flush:  15 * time.Millisecond,
-		send:   map[string]*fecSendBlock{},
-		saddr:  map[string]net.Addr{},
-		reasm:  map[string]*blockReassembler{},
-		deliv:  make(chan fecDelivered, 1024),
-		done:   make(chan struct{}),
-		rdl:    deadline.New(),
+		inner:    inner,
+		codec:    newFECCodec(),
+		ctrl:     newTierController(5 * time.Second),
+		lossFn:   lossFn,
+		data:     10,
+		flush:    15 * time.Millisecond,
+		send:     map[string]*fecSendBlock{},
+		saddr:    map[string]net.Addr{},
+		reasm:    map[string]*blockReassembler{},
+		lastSeen: map[string]time.Time{},
+		idle:     2 * time.Minute,
+		deliv:    make(chan fecDelivered, 1024),
+		done:     make(chan struct{}),
+		rdl:      deadline.New(),
 	}
 	go c.readLoop()
 	go c.flushLoop()
@@ -91,6 +96,7 @@ func (c *fecConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 		c.send[key] = sb
 		c.saddr[key] = addr
 	}
+	c.lastSeen[key] = time.Now()
 	cp := make([]byte, len(b))
 	copy(cp, b)
 	sb.bufs = append(sb.bufs, cp)
@@ -148,11 +154,34 @@ func (c *fecConn) flushLoop() {
 					out = append(out, pending{c.sealLocked(key), c.saddr[key]})
 				}
 			}
+			// Prune per-peer block state for sessions gone quiet, so a
+			// long-running multi-peer server (one fecConn for every client) does
+			// not accumulate a 128-block reassembler per session forever. Run it
+			// at a coarse cadence, not every tick.
+			if now.Sub(c.lastPrune) >= c.idle {
+				c.pruneIdleLocked(now)
+				c.lastPrune = now
+			}
 			c.mu.Unlock()
 			for _, p := range out {
 				_ = c.sendFrames(p.frames, p.addr)
 			}
 		}
+	}
+}
+
+// pruneIdleLocked drops all per-peer block state for peers with no activity
+// within c.idle. Caller holds c.mu. A pruned peer that speaks again simply
+// re-creates its state on the next datagram.
+func (c *fecConn) pruneIdleLocked(now time.Time) {
+	for key, seen := range c.lastSeen {
+		if now.Sub(seen) < c.idle {
+			continue
+		}
+		delete(c.send, key)
+		delete(c.saddr, key)
+		delete(c.reasm, key)
+		delete(c.lastSeen, key)
 	}
 }
 
@@ -175,8 +204,10 @@ func (c *fecConn) readLoop() {
 		}
 		frame := make([]byte, n)
 		copy(frame, buf[:n])
+		key := addr.String()
 		c.mu.Lock()
-		payloads := c.reasmFor(addr.String()).decode(frame)
+		c.lastSeen[key] = time.Now()
+		payloads := c.reasmFor(key).decode(frame)
 		c.mu.Unlock()
 		for _, p := range payloads {
 			select {

@@ -39,13 +39,13 @@ type Acquirer interface {
 const DefaultUplinkQueue = 256
 
 type Options struct {
-	Workers           int
-	Peer              *net.UDPAddr
-	Wrapper           obfs.Wrapper
-	Creds             Acquirer
-	TURNUDP           bool
-	TURNOverride      string
-	ProbeInterval     time.Duration
+	Workers       int
+	Peer          *net.UDPAddr
+	Wrapper       obfs.Wrapper
+	Creds         Acquirer
+	TURNUDP       bool
+	TURNOverride  string
+	ProbeInterval time.Duration
 	// HealthProbeInterval is how often each worker sends a health probe to
 	// measure its relay's RTT and loss (the server echoes probes). It is
 	// faster than ProbeInterval, which also carries the hello and drives
@@ -139,9 +139,9 @@ type Pool struct {
 	wg         sync.WaitGroup
 	closeOnce  sync.Once
 	closed     chan struct{}
-	health     []*workerHealth  // per-worker, indexed by worker id; set in Start
-	evict      []chan struct{}  // per-worker eviction signal; set in Start
-	evictions  atomic.Int32     // cumulative relays retired by the supervisor
+	health     []*workerHealth // per-worker, indexed by worker id; set in Start
+	evict      []chan struct{} // per-worker eviction signal; set in Start
+	evictions  atomic.Int32    // cumulative relays retired by the supervisor
 }
 
 func New(o Options) *Pool {
