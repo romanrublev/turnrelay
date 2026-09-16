@@ -44,6 +44,12 @@ func onReady() {
 			if s.Workers > 0 {
 				line += fmt.Sprintf("  (%d)", s.Workers)
 			}
+			if s.MeanRTTMs > 0 {
+				line += fmt.Sprintf("  %dms  loss %.1f%%", s.MeanRTTMs, s.MaxLossPct)
+			}
+			if s.Evictions > 0 {
+				line += fmt.Sprintf("  evicted %d", s.Evictions)
+			}
 			mStatus.SetTitle(line)
 			mToggle.SetTitle("Disconnect")
 		default:

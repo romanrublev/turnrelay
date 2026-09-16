@@ -43,6 +43,7 @@ func (s staticCreds) Acquire(_ context.Context, worker int) (*credpool.Lease, er
 }
 func (staticCreds) Release(*credpool.Lease)       {}
 func (staticCreds) Failed(*credpool.Lease, error) {}
+func (staticCreds) FailedRelay(*credpool.Lease)   {}
 
 // echoConn stands in for an obfs conn talking to an echo VPS: hellos are
 // consumed, probes and payload echoed back to Read. With failPayload set,
@@ -183,4 +184,66 @@ func TestUplinkPacketSurvivesWorkerDeath(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+}
+
+// recordingCreds hands every worker the same credential and records how many
+// times FailedRelay is called, for the eviction-wiring test.
+type recordingCreds struct {
+	cred provider.Credential
+	mu   sync.Mutex
+	n    int
+}
+
+func (r *recordingCreds) Acquire(_ context.Context, worker int) (*credpool.Lease, error) {
+	return &credpool.Lease{Cred: r.cred, Index: worker}, nil
+}
+func (*recordingCreds) Release(*credpool.Lease)       {}
+func (*recordingCreds) Failed(*credpool.Lease, error) {}
+func (r *recordingCreds) FailedRelay(*credpool.Lease) {
+	r.mu.Lock()
+	r.n++
+	r.mu.Unlock()
+}
+func (r *recordingCreds) failedRelays() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.n
+}
+
+// TestSupervisorEvictionRetiresRelay drives the eviction seam directly: a
+// signal on a worker's evict channel must tear that worker down via
+// FailedRelay (cooling its relay) and the pool must recover to full strength
+// as the worker re-acquires. The supervisor's own ranking is unit-tested in
+// pickEvict; here SuperviseInterval is set huge so only the manual signal fires.
+func TestSupervisorEvictionRetiresRelay(t *testing.T) {
+	ts := turntest.Start(t)
+	w := &echoWrapper{}
+	rc := &recordingCreds{cred: provider.Credential{Username: ts.Username, Password: ts.Password, Relays: []string{ts.Addr()}}}
+	p := New(Options{
+		Workers: 2, Peer: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1}, Wrapper: w,
+		Creds: rc, TURNUDP: true,
+		ProbeInterval: 200 * time.Millisecond, HealthProbeInterval: 50 * time.Millisecond,
+		ZombieAfter: 2 * time.Second, StartPacing: 10 * time.Millisecond,
+		BackoffMin: 20 * time.Millisecond, BackoffMax: 100 * time.Millisecond,
+		SuperviseInterval: time.Hour, // no auto-eviction; the test drives evict[0]
+		Logf:              t.Logf,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	t.Cleanup(p.Close)
+	p.Start(ctx)
+	if err := p.WaitReady(ctx, 2); err != nil {
+		t.Fatal(err)
+	}
+
+	p.evict[0] <- struct{}{} // retire worker 0's relay
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if rc.failedRelays() >= 1 && int(p.active.Load()) >= 2 {
+			return // relay cooled and the pool recovered to full strength
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("eviction not wired: failedRelays=%d active=%d", rc.failedRelays(), p.active.Load())
 }

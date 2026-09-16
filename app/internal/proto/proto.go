@@ -27,6 +27,10 @@ type Status struct {
 	Egress      string `json:"egress"`
 	HandshakeOK bool   `json:"handshake_ok"`
 	Error       string `json:"error"`
+	// Health-based worker pool telemetry.
+	Evictions  int     `json:"evictions"`    // cumulative lossy relays retired
+	MaxLossPct float64 `json:"max_loss_pct"` // worst active worker's smoothed loss
+	MeanRTTMs  int     `json:"mean_rtt_ms"`  // mean active-worker relay RTT
 }
 
 type Response struct {

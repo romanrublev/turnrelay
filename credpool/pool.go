@@ -24,6 +24,12 @@ type Options struct {
 	CooldownMin     time.Duration
 	CooldownMax     time.Duration
 	CaptchaCooldown time.Duration
+	// RelayCooldown is how long a relay reported degraded via FailedRelay is
+	// avoided. VK hands only 1-2 relays per credential, so a lossy relay
+	// effectively poisons its credential; the cooldown is keyed by relay URL
+	// and outlives a re-fetch, so a fresh credential that returns the same
+	// bad relay IP is skipped too.
+	RelayCooldown   time.Duration
 	Now             func() time.Time
 	Sleep           func(context.Context, time.Duration) error
 	Logf            func(string, ...any)
@@ -57,6 +63,9 @@ func (o *Options) defaults() {
 	}
 	if o.CaptchaCooldown == 0 {
 		o.CaptchaCooldown = time.Minute
+	}
+	if o.RelayCooldown == 0 {
+		o.RelayCooldown = 5 * time.Minute
 	}
 	if o.Now == nil {
 		o.Now = time.Now
@@ -110,6 +119,7 @@ type Pool struct {
 
 	mu        sync.Mutex
 	slots     map[int]*slot
+	badRelays map[string]time.Time // relay URL -> cooldown expiry
 	fetchMu   sync.Mutex // one fetch at a time
 	lastFetch time.Time
 	captcha   time.Time
@@ -118,7 +128,7 @@ type Pool struct {
 
 func New(f Fetcher, o Options) *Pool {
 	o.defaults()
-	return &Pool{fetch: f, o: o, slots: map[int]*slot{}}
+	return &Pool{fetch: f, o: o, slots: map[int]*slot{}, badRelays: map[string]time.Time{}}
 }
 
 func (p *Pool) linkFor(s int) string { return p.o.Links[s%len(p.o.Links)] }
@@ -138,16 +148,62 @@ func (p *Pool) expired(s *slot) bool {
 	return !p.o.Now().Before(s.cred.FetchedAt.Add(p.o.TTL - p.o.Margin))
 }
 
+// usable reports whether s can issue a lease right now. Besides validity,
+// quota and expiry it requires a free index whose relay is not on a degraded
+// cooldown: a slot whose only free relays are cooling cannot serve a worker, so
+// Acquire must move on to another link rather than treat it as ready. With no
+// cooled relays this reduces to "valid, unsaturated, unexpired, not full",
+// unchanged from before. p.mu must be held (freeLiveIndex reads badRelays).
 func (p *Pool) usable(s *slot) bool {
-	return s != nil && s.valid && !s.saturated && !p.expired(s) && len(s.active) < p.o.ConnsPerSlot
+	if s == nil || !s.valid || s.saturated || p.expired(s) {
+		return false
+	}
+	_, ok := p.freeLiveIndex(s)
+	return ok
 }
 
-func (p *Pool) lease(id int, s *slot) *Lease {
+// relayCooling reports whether url is currently on a degraded-relay cooldown,
+// clearing an expired entry as a side effect. p.mu must be held.
+func (p *Pool) relayCooling(url string) bool {
+	if url == "" {
+		return false
+	}
+	until, ok := p.badRelays[url]
+	if !ok {
+		return false
+	}
+	if !p.o.Now().Before(until) {
+		delete(p.badRelays, url)
+		return false
+	}
+	return true
+}
+
+// freeLiveIndex returns a free index in s whose relay is not cooling down, and
+// whether one exists. Indices map to relays as Relay(i)=Relays[i%N], so with a
+// short relay list some free indices may all point at a cooling relay while a
+// live one is fully in use; then no live index is free and the caller moves on
+// to another slot. p.mu must be held.
+func (p *Pool) freeLiveIndex(s *slot) (int, bool) {
 	for i := 0; i < p.o.ConnsPerSlot; i++ {
-		if !s.active[i] {
-			s.active[i] = true
-			return &Lease{Cred: s.cred, Slot: id, Index: i, s: s}
+		if s.active[i] {
+			continue
 		}
+		if p.relayCooling(s.cred.Relay(i)) {
+			continue
+		}
+		return i, true
+	}
+	return 0, false
+}
+
+// lease issues a lease on the first free index of s whose relay is not cooling,
+// or nil when none is available. With no cooling relays this is the first free
+// index, unchanged from before. p.mu must be held.
+func (p *Pool) lease(id int, s *slot) *Lease {
+	if i, ok := p.freeLiveIndex(s); ok {
+		s.active[i] = true
+		return &Lease{Cred: s.cred, Slot: id, Index: i, s: s}
 	}
 	return nil
 }
@@ -156,7 +212,9 @@ func (p *Pool) lease(id int, s *slot) *Lease {
 func (p *Pool) borrow() (*Lease, bool) {
 	for id, s := range p.slots {
 		if p.usable(s) {
-			return p.lease(id, s), true
+			if l := p.lease(id, s); l != nil {
+				return l, true
+			}
 		}
 	}
 	return nil, false
@@ -168,9 +226,12 @@ func (p *Pool) Acquire(ctx context.Context, worker int) (*Lease, error) {
 		p.mu.Lock()
 		ownSlot := p.slots[own]
 		if p.usable(ownSlot) {
-			l := p.lease(own, ownSlot)
-			p.mu.Unlock()
-			return l, nil
+			if l := p.lease(own, ownSlot); l != nil {
+				p.mu.Unlock()
+				return l, nil
+			}
+			// The slot is otherwise usable but can only offer a cooling
+			// relay right now; fall through to borrow or fetch a fresh link.
 		}
 		captchaActive := p.o.Now().Before(p.captcha)
 		// Borrow spare capacity from another slot when this worker's own
@@ -293,6 +354,28 @@ func (p *Pool) Failed(l *Lease, err error) {
 		p.o.Logf("credpool: slot %d invalidated (%v)", l.Slot, err)
 	}
 	p.lastErr = err
+	p.mu.Unlock()
+	p.Release(l)
+}
+
+// FailedRelay marks the specific relay this lease rode as degraded (lossy or
+// slow) so the pool avoids it for RelayCooldown, then releases the lease.
+// Unlike Failed, which acts on the whole credential for a quota (486) or auth
+// error, this targets one relay URL: it is the health-based worker pool's lever
+// for retiring a relay that answers yet drops or delays traffic, which the
+// credential-level signals never catch. With VK handing only 1-2 relays per
+// credential, cooling the relay usually makes its slot unusable, so the worker
+// re-acquires from a different link.
+func (p *Pool) FailedRelay(l *Lease) {
+	if l == nil || l.s == nil {
+		return
+	}
+	url := l.Cred.Relay(l.Index)
+	p.mu.Lock()
+	if url != "" {
+		p.badRelays[url] = p.o.Now().Add(p.o.RelayCooldown)
+		p.o.Logf("credpool: relay %s cooled for %v (degraded)", url, p.o.RelayCooldown)
+	}
 	p.mu.Unlock()
 	p.Release(l)
 }

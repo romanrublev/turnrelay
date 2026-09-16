@@ -14,11 +14,14 @@ import (
 // its own copy so it stays a separate module with no dependency on the daemon
 // package.
 type Status struct {
-	Running     bool   `json:"running"`
-	Workers     int    `json:"workers"`
-	Egress      string `json:"egress"`
-	HandshakeOK bool   `json:"handshake_ok"`
-	Error       string `json:"error"`
+	Running     bool    `json:"running"`
+	Workers     int     `json:"workers"`
+	Egress      string  `json:"egress"`
+	HandshakeOK bool    `json:"handshake_ok"`
+	Error       string  `json:"error"`
+	Evictions   int     `json:"evictions"`
+	MaxLossPct  float64 `json:"max_loss_pct"`
+	MeanRTTMs   int     `json:"mean_rtt_ms"`
 }
 
 // binaryPath is the turnrelay CLI the tray drives: $TURNRELAY_BIN if set,

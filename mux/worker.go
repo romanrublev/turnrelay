@@ -12,6 +12,10 @@ import (
 	"github.com/romanrublev/turnrelay/relay"
 )
 
+// errEvicted is the sentinel a worker's evict watcher pushes when the
+// supervisor retires its relay. once() maps it to a deliberate teardown.
+var errEvicted = errors.New("mux: worker evicted by supervisor")
+
 type worker struct {
 	id   int
 	pool *Pool
@@ -76,7 +80,18 @@ func (w *worker) once(ctx context.Context) (reached bool, err error) {
 		p.o.Creds.Failed(lease, err)
 		return false, err
 	}
-	defer p.o.Creds.Release(lease)
+	// evicted is set when the supervisor retires this worker's relay; the
+	// cleanup then cools that relay (FailedRelay) instead of a plain Release,
+	// so the next Acquire hands a different one. Any pre-active failure leaves
+	// evicted false and releases normally.
+	evicted := false
+	defer func() {
+		if evicted {
+			p.o.Creds.FailedRelay(lease)
+		} else {
+			p.o.Creds.Release(lease)
+		}
+	}()
 	defer alloc.Close()
 
 	wctx, cancel := context.WithCancel(ctx)
@@ -110,11 +125,32 @@ func (w *worker) once(ctx context.Context) (reached bool, err error) {
 	p.active.Add(1)
 	p.broadcastReady()
 	defer p.active.Add(-1)
+	// Fresh relay, fresh health: clear the previous session's RTT/loss so the
+	// new relay is judged on its own behaviour.
+	health := p.health[w.id]
+	health.reset()
+	health.setActive(true)
+	defer health.setActive(false)
 	p.o.Logf("mux: worker %d up via %s relayed %s", w.id, server, alloc.RelayedAddr())
 
 	var lastInbound atomic.Int64
 	lastInbound.Store(time.Now().UnixNano())
-	errCh := make(chan error, 3)
+	errCh := make(chan error, 4)
+
+	// Drop any eviction signal left over from a previous session, then watch
+	// for a fresh one from the supervisor.
+	select {
+	case <-p.evict[w.id]:
+	default:
+	}
+	go func() {
+		select {
+		case <-wctx.Done():
+			errCh <- nil
+		case <-p.evict[w.id]:
+			errCh <- errEvicted
+		}
+	}()
 
 	// uplink: steal from the shared queue
 	go func() {
@@ -156,7 +192,15 @@ func (w *worker) once(ctx context.Context) (reached bool, err error) {
 				return
 			}
 			lastInbound.Store(time.Now().UnixNano())
-			if n == 0 || IsControl(buf[:n]) {
+			if n == 0 {
+				continue
+			}
+			if IsControl(buf[:n]) {
+				// The server echoes probes; match the echo to time this
+				// worker's relay RTT and count it as a delivered probe.
+				if seq, ok := ParseProbe(buf[:n]); ok {
+					health.ackProbe(seq, time.Now())
+				}
 				continue
 			}
 			pkt := make([]byte, n)
@@ -170,22 +214,30 @@ func (w *worker) once(ctx context.Context) (reached bool, err error) {
 		}
 	}()
 
-	// probes and zombie detection
+	// health probes (fast: RTT/loss per relay) and keepalive/zombie (slow:
+	// hello refresh + inbound-liveness check). The server echoes probes, so
+	// each probe is a round trip the downlink loop times via health.ackProbe.
 	go func() {
-		t := time.NewTicker(p.o.ProbeInterval)
-		defer t.Stop()
+		ht := time.NewTicker(p.o.HealthProbeInterval)
+		defer ht.Stop()
+		kt := time.NewTicker(p.o.ProbeInterval)
+		defer kt.Stop()
 		var seq uint64
 		for {
 			select {
 			case <-wctx.Done():
 				errCh <- nil
 				return
-			case <-t.C:
+			case <-ht.C:
 				seq++
+				now := time.Now()
+				health.sentProbe(seq, now)
+				health.tick(now) // sweep older unanswered probes into loss
 				if _, err := conn.Write(EncodeProbe(seq)); err != nil {
 					errCh <- err
 					return
 				}
+			case <-kt.C:
 				if _, err := conn.Write(EncodeHello(p.session)); err != nil {
 					errCh <- err
 					return
@@ -199,6 +251,12 @@ func (w *worker) once(ctx context.Context) (reached bool, err error) {
 	}()
 
 	err = <-errCh
+	if errors.Is(err, errEvicted) {
+		// Deliberate retire: the deferred cleanup cools the relay, and run
+		// treats a nil error as a healthy session so it re-acquires promptly.
+		evicted = true
+		err = nil
+	}
 	cancel()
 	_ = conn.SetReadDeadline(time.Now())
 	if ctx.Err() != nil {

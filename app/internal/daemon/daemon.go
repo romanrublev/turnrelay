@@ -109,6 +109,9 @@ func (d *Daemon) Status() proto.Status {
 		Workers:     d.eng.Workers(),
 		Egress:      egress,
 		HandshakeOK: d.eng.HandshakeOK(),
+		Evictions:   d.eng.Evictions(),
+		MaxLossPct:  d.eng.MaxLossPct(),
+		MeanRTTMs:   d.eng.MeanRTTMs(),
 	}
 }
 

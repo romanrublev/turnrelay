@@ -26,6 +26,11 @@ type Acquirer interface {
 	Acquire(ctx context.Context, worker int) (*credpool.Lease, error)
 	Release(*credpool.Lease)
 	Failed(*credpool.Lease, error)
+	// FailedRelay marks the relay this lease rode as degraded (lossy/slow) so
+	// the pool avoids it for a cooldown, then releases the lease. The
+	// supervisor uses it to retire a relay whose health probes show loss or
+	// latency the credential-level Failed never sees.
+	FailedRelay(*credpool.Lease)
 }
 
 // DefaultUplinkQueue is the uplink queue depth when Options.UplinkQueue is
@@ -41,6 +46,15 @@ type Options struct {
 	TURNUDP           bool
 	TURNOverride      string
 	ProbeInterval     time.Duration
+	// HealthProbeInterval is how often each worker sends a health probe to
+	// measure its relay's RTT and loss (the server echoes probes). It is
+	// faster than ProbeInterval, which also carries the hello and drives
+	// zombie detection. Default 1s.
+	HealthProbeInterval time.Duration
+	// SuperviseInterval is how often the supervisor ranks worker health and
+	// may evict the single worst relay. Default 5s. Zero disables eviction
+	// only if negative; use a large value to effectively disable.
+	SuperviseInterval time.Duration
 	ZombieAfter       time.Duration
 	StartPacing       time.Duration
 	KeepaliveInterval time.Duration
@@ -64,6 +78,12 @@ func (o *Options) defaults() {
 	}
 	if o.ProbeInterval == 0 {
 		o.ProbeInterval = 30 * time.Second
+	}
+	if o.HealthProbeInterval == 0 {
+		o.HealthProbeInterval = time.Second
+	}
+	if o.SuperviseInterval == 0 {
+		o.SuperviseInterval = 5 * time.Second
 	}
 	if o.ZombieAfter == 0 {
 		o.ZombieAfter = 120 * time.Second
@@ -119,6 +139,9 @@ type Pool struct {
 	wg         sync.WaitGroup
 	closeOnce  sync.Once
 	closed     chan struct{}
+	health     []*workerHealth  // per-worker, indexed by worker id; set in Start
+	evict      []chan struct{}  // per-worker eviction signal; set in Start
+	evictions  atomic.Int32     // cumulative relays retired by the supervisor
 }
 
 func New(o Options) *Pool {
@@ -137,6 +160,14 @@ func (p *Pool) Session() [16]byte { return p.session }
 
 func (p *Pool) Start(ctx context.Context) {
 	ctx, p.cancel = context.WithCancel(ctx)
+	p.health = make([]*workerHealth, p.o.Workers)
+	p.evict = make([]chan struct{}, p.o.Workers)
+	for i := range p.health {
+		p.health[i] = newWorkerHealth()
+		p.evict[i] = make(chan struct{}, 1)
+	}
+	p.wg.Add(1)
+	go func() { defer p.wg.Done(); p.supervise(ctx) }()
 	for i := 0; i < p.o.Workers; i++ {
 		w := &worker{id: i, pool: p}
 		p.wg.Add(1)
@@ -150,6 +181,78 @@ func (p *Pool) Start(ctx context.Context) {
 			w.run(ctx)
 		}(time.Duration(i) * p.o.StartPacing)
 	}
+}
+
+// supervise periodically ranks worker health and signals the single worst
+// relay for eviction. It evicts at most one worker per interval, so a bad
+// batch is retired gradually and the pipe is never gutted chasing marginal
+// gains; pickEvict also refuses to drop below one active worker. An evicted
+// worker's run loop re-acquires from the credential pool, which cools the bad
+// relay and hands it a different one.
+func (p *Pool) supervise(ctx context.Context) {
+	t := time.NewTicker(p.o.SuperviseInterval)
+	defer t.Stop()
+	var cfg evictConfig
+	cfg.defaults()
+	// Emit a machine-parseable health gauge every gaugeEvery passes (~30s at
+	// the default 5s interval) so the engine can surface loss/RTT/evictions.
+	const gaugeEvery = 6
+	pass := 0
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-p.closed:
+			return
+		case <-t.C:
+			snaps := make([]healthSnapshot, len(p.health))
+			for i, h := range p.health {
+				snaps[i] = h.snapshot(i)
+			}
+			if id := pickEvict(snaps, cfg); id >= 0 {
+				select {
+				case p.evict[id] <- struct{}{}:
+					p.evictions.Add(1)
+					p.o.Logf("mux: evict worker %d (loss %.1f%%, rtt %v) - retiring relay",
+						id, snaps[id].loss*100, snaps[id].rtt)
+				default: // a prior signal is still pending; leave it
+				}
+			}
+			if pass%gaugeEvery == 0 {
+				p.logHealthGauge(snaps)
+			}
+			pass++
+		}
+	}
+}
+
+// logHealthGauge emits one stable line summarising fleet health. Values are
+// integers (loss in basis points, RTT in ms) so a log scanner parses them
+// without locale or float-format surprises.
+func (p *Pool) logHealthGauge(snaps []healthSnapshot) {
+	active := 0
+	var maxLoss float64
+	var rttSum time.Duration
+	rttN := 0
+	for _, s := range snaps {
+		if !s.active {
+			continue
+		}
+		active++
+		if s.loss > maxLoss {
+			maxLoss = s.loss
+		}
+		if s.rtt > 0 {
+			rttSum += s.rtt
+			rttN++
+		}
+	}
+	meanRTTMs := 0
+	if rttN > 0 {
+		meanRTTMs = int((rttSum / time.Duration(rttN)) / time.Millisecond)
+	}
+	p.o.Logf("mux: health active=%d evictions=%d max_loss_bp=%d mean_rtt_ms=%d",
+		active, int(p.evictions.Load()), int(maxLoss*10000), meanRTTMs)
 }
 
 func (p *Pool) Close() {

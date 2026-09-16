@@ -22,3 +22,23 @@ func TestScanHandshake(t *testing.T) {
 		t.Fatal("handshake response should set ok")
 	}
 }
+
+func TestScanHealthGauge(t *testing.T) {
+	var c Counters
+	// A gauge line as the mux supervisor emits it, with a sing-box log prefix.
+	scanLine("outbound/turnrelay[relay]: mux: health active=59 evictions=3 max_loss_bp=1850 mean_rtt_ms=142", &c)
+	if c.Evictions.Load() != 3 {
+		t.Fatalf("evictions=%d, want 3", c.Evictions.Load())
+	}
+	if c.MaxLossBp.Load() != 1850 { // 18.5%
+		t.Fatalf("max_loss_bp=%d, want 1850", c.MaxLossBp.Load())
+	}
+	if c.MeanRTTMs.Load() != 142 {
+		t.Fatalf("mean_rtt_ms=%d, want 142", c.MeanRTTMs.Load())
+	}
+	// A later gauge replaces the values (gauge, not delta).
+	scanLine("outbound/turnrelay[relay]: mux: health active=60 evictions=3 max_loss_bp=40 mean_rtt_ms=95", &c)
+	if c.MaxLossBp.Load() != 40 {
+		t.Fatalf("gauge not replaced: max_loss_bp=%d, want 40", c.MaxLossBp.Load())
+	}
+}
