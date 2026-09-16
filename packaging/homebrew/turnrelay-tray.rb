@@ -1,15 +1,15 @@
 class TurnrelayTray < Formula
   desc "System-tray GUI for the turnrelay VPN"
   homepage "https://github.com/romanrublev/turnrelay"
-  version "0.3.0-beta"
+  version "0.4.0-beta"
   license "GPL-3.0-or-later"
 
   depends_on "romanrublev/turnrelay/turnrelay"
 
   on_macos do
     on_arm do
-      url "https://github.com/romanrublev/turnrelay/releases/download/v0.3.0-beta/turnrelay-tray-darwin-arm64.tar.gz"
-      sha256 "046e50d04736201dc03943ad6857cb8c934557049bb8945de3e54dc6f6158263"
+      url "https://github.com/romanrublev/turnrelay/releases/download/v0.4.0-beta/turnrelay-tray-darwin-arm64.tar.gz"
+      sha256 "d9d30bf95165e71160f141bb60614fdb07202683b088e91b53ffc42401df5359"
     end
   end
 
