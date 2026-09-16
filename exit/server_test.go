@@ -93,6 +93,15 @@ func rawClient(t *testing.T, server net.Addr) (*smux.Session, *Demux) {
 	return sess, d
 }
 
+// rawUDP wraps a demux's UDP side in the same realtime FEC the server applies,
+// so a hand-built client's UDP frames match the server's FEC framing.
+func rawUDP(t *testing.T, d *Demux) net.PacketConn {
+	t.Helper()
+	c := newRealtimeFECConn(d.UDP(), d.LossRate)
+	t.Cleanup(func() { _ = c.Close() })
+	return c
+}
+
 func TestServerTCPStreamsEcho(t *testing.T) {
 	echo := tcpEcho(t)
 	server := startServer(t, ServerOptions{AllowPrivate: true})
@@ -143,16 +152,17 @@ func TestServerUDPFramesEcho(t *testing.T) {
 	echo := udpEcho(t)
 	server := startServer(t, ServerOptions{AllowPrivate: true})
 	_, d := rawClient(t, server)
+	u := rawUDP(t, d)
 	frame, err := EncodeUDPFrame(7, M.SocksaddrFromNet(echo), []byte("dgram"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := d.UDP().WriteTo(frame, server); err != nil {
+	if _, err := u.WriteTo(frame, server); err != nil {
 		t.Fatal(err)
 	}
 	buf := make([]byte, 128)
-	_ = d.UDP().SetReadDeadline(time.Now().Add(5 * time.Second))
-	n, _, err := d.UDP().ReadFrom(buf)
+	_ = u.SetReadDeadline(time.Now().Add(5 * time.Second))
+	n, _, err := u.ReadFrom(buf)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,17 +231,18 @@ func TestServerStopsOnCtxCancel(t *testing.T) {
 		t.Fatal(err)
 	}
 	d := NewDemux(cpc)
+	u := rawUDP(t, d)
 	t.Cleanup(func() { d.Close() })
 	frame, err := EncodeUDPFrame(1, M.SocksaddrFromNet(echo), []byte("x"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := d.UDP().WriteTo(frame, pc.LocalAddr()); err != nil {
+	if _, err := u.WriteTo(frame, pc.LocalAddr()); err != nil {
 		t.Fatal(err)
 	}
 	buf := make([]byte, 128)
-	_ = d.UDP().SetReadDeadline(time.Now().Add(300 * time.Millisecond))
-	if n, _, err := d.UDP().ReadFrom(buf); err == nil {
+	_ = u.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	if n, _, err := u.ReadFrom(buf); err == nil {
 		t.Fatalf("got %d bytes after Serve stopped on ctx cancel, want nothing", n)
 	}
 }
@@ -256,25 +267,26 @@ func TestServerUDPNoHeadOfLineBlocking(t *testing.T) {
 	}
 	server := startServer(t, ServerOptions{AllowPrivate: true, Resolver: resolver, DialTimeout: 30 * time.Second})
 	_, d := rawClient(t, server)
+	u := rawUDP(t, d)
 
 	slowFrame, err := EncodeUDPFrame(1, M.ParseSocksaddrHostPort("slow.invalid", 9999), []byte("slow"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := d.UDP().WriteTo(slowFrame, server); err != nil {
+	if _, err := u.WriteTo(slowFrame, server); err != nil {
 		t.Fatal(err)
 	}
 	fastFrame, err := EncodeUDPFrame(2, M.SocksaddrFromNet(echo), []byte("fast"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := d.UDP().WriteTo(fastFrame, server); err != nil {
+	if _, err := u.WriteTo(fastFrame, server); err != nil {
 		t.Fatal(err)
 	}
 
 	buf := make([]byte, 128)
-	_ = d.UDP().SetReadDeadline(time.Now().Add(3 * time.Second))
-	n, _, err := d.UDP().ReadFrom(buf)
+	_ = u.SetReadDeadline(time.Now().Add(3 * time.Second))
+	n, _, err := u.ReadFrom(buf)
 	if err != nil {
 		close(release)
 		t.Fatalf("fast association got no reply while the slow one blocked: %v", err)
@@ -306,18 +318,19 @@ func TestServerUDPCachesResolvedDestination(t *testing.T) {
 	}
 	server := startServer(t, ServerOptions{AllowPrivate: true, Resolver: resolver})
 	_, d := rawClient(t, server)
+	u := rawUDP(t, d)
 	dest := M.ParseSocksaddrHostPort("echo.test", echoAP.Port())
 	for i := 0; i < 5; i++ {
 		frame, err := EncodeUDPFrame(9, dest, []byte{byte(i)})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := d.UDP().WriteTo(frame, server); err != nil {
+		if _, err := u.WriteTo(frame, server); err != nil {
 			t.Fatal(err)
 		}
 		buf := make([]byte, 64)
-		_ = d.UDP().SetReadDeadline(time.Now().Add(3 * time.Second))
-		n, _, err := d.UDP().ReadFrom(buf)
+		_ = u.SetReadDeadline(time.Now().Add(3 * time.Second))
+		n, _, err := u.ReadFrom(buf)
 		if err != nil {
 			t.Fatalf("i=%d: %v", i, err)
 		}

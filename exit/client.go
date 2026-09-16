@@ -27,10 +27,11 @@ type ClientOptions struct {
 // session, UDP through framed datagrams with one association per
 // ListenPacket conn.
 type Client struct {
-	pipe   net.PacketConn
-	server net.Addr
-	demux  *Demux
-	o      ClientOptions
+	pipe    net.PacketConn
+	server  net.Addr
+	demux   *Demux
+	udpPipe net.PacketConn // demux.UDP() wrapped in adaptive FEC (realtime flush)
+	o       ClientOptions
 
 	mu   sync.Mutex
 	ks   *kcp.UDPSession
@@ -49,6 +50,9 @@ func NewClient(pipe net.PacketConn, server net.Addr, o ClientOptions) *Client {
 		o.Logf = func(string, ...any) {}
 	}
 	c := &Client{pipe: pipe, server: server, demux: NewDemux(pipe), o: o, assocs: map[uint16]*clientAssoc{}, closed: make(chan struct{})}
+	// FEC-protect the UDP passthrough too (adaptive block FEC, short flush for
+	// real-time), so datagram apps get the same loss recovery as the KCP path.
+	c.udpPipe = newRealtimeFECConn(c.demux.UDP(), c.demux.LossRate)
 	c.next = uint16(rand.Uint32())
 	go c.udpLoop()
 	return c
@@ -66,6 +70,9 @@ func (c *Client) Close() error {
 		}
 		c.ks, c.sess = nil, nil
 		c.mu.Unlock()
+		if c.udpPipe != nil {
+			_ = c.udpPipe.Close()
+		}
 		_ = c.demux.Close()
 	})
 	return nil
@@ -148,7 +155,7 @@ func (c *Client) ListenPacket(ctx context.Context, dest M.Socksaddr) (net.Packet
 
 func (c *Client) udpLoop() {
 	buf := make([]byte, 65535)
-	udp := c.demux.UDP()
+	udp := c.udpPipe
 	for {
 		n, _, err := udp.ReadFrom(buf)
 		if err != nil {
@@ -200,7 +207,7 @@ func (a *clientAssoc) WriteTo(b []byte, addr net.Addr) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	if _, err := a.c.demux.UDP().WriteTo(frame, a.c.server); err != nil {
+	if _, err := a.c.udpPipe.WriteTo(frame, a.c.server); err != nil {
 		return 0, err
 	}
 	return len(b), nil

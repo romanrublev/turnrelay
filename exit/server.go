@@ -55,14 +55,15 @@ func (o *ServerOptions) defaults() {
 // peer address per client session) and dials out: smux streams over KCP for
 // TCP, framed datagrams for UDP.
 type Server struct {
-	o      ServerOptions
-	demux  *Demux
-	dialer net.Dialer
-	lc     net.ListenConfig
-	amu    sync.Mutex
-	assocs map[string]*assoc
-	once   sync.Once
-	closed chan struct{}
+	o       ServerOptions
+	demux   *Demux
+	udpPipe net.PacketConn // demux.UDP() wrapped in adaptive FEC (realtime flush)
+	dialer  net.Dialer
+	lc      net.ListenConfig
+	amu     sync.Mutex
+	assocs  map[string]*assoc
+	once    sync.Once
+	closed  chan struct{}
 }
 
 // maxAssocCache bounds the per-association resolve cache so a client naming
@@ -117,6 +118,9 @@ func (a *assoc) target(ctx context.Context, s *Server, dest M.Socksaddr) (netip.
 func NewServer(pc net.PacketConn, o ServerOptions) *Server {
 	o.defaults()
 	s := &Server{o: o, demux: NewDemux(pc), assocs: map[string]*assoc{}, closed: make(chan struct{})}
+	// FEC-protect the UDP passthrough (adaptive block FEC, short flush), the
+	// mirror of the client's udpPipe, so datagram apps get loss recovery.
+	s.udpPipe = newRealtimeFECConn(s.demux.UDP(), s.demux.LossRate)
 	if o.Bind != "" {
 		if ip := net.ParseIP(o.Bind); ip != nil {
 			s.dialer.LocalAddr = &net.TCPAddr{IP: ip}
@@ -128,6 +132,9 @@ func NewServer(pc net.PacketConn, o ServerOptions) *Server {
 func (s *Server) Close() error {
 	s.once.Do(func() {
 		close(s.closed)
+		if s.udpPipe != nil {
+			_ = s.udpPipe.Close()
+		}
 		_ = s.demux.Close()
 		s.amu.Lock()
 		for _, a := range s.assocs {
@@ -257,7 +264,7 @@ func isPrivate(ip netip.Addr) bool {
 // serveUDP reads UDP frames from every session and forwards them from a
 // per-(session, assoc) socket; replies go back as frames to that session.
 func (s *Server) serveUDP(ctx context.Context) {
-	udp := s.demux.UDP()
+	udp := s.udpPipe
 	go s.reapAssocs(ctx)
 	buf := make([]byte, 65535)
 	for {

@@ -54,14 +54,28 @@ type fecDelivered struct {
 	addr net.Addr
 }
 
+// newFECConn wraps the KCP-side pipe: FEC batched with a 15ms flush, which KCP
+// tolerates and which maximises coding efficiency.
 func newFECConn(inner net.PacketConn, lossFn func() float64) *fecConn {
+	return newFECConnFlush(inner, lossFn, 15*time.Millisecond)
+}
+
+// newRealtimeFECConn wraps the UDP passthrough: the same block FEC with a short
+// flush, so a sparse real-time flow (a call, a game) waits at most a few ms for
+// its block to seal instead of the KCP-side 15ms. Under load the block fills by
+// count first, so the shorter flush costs nothing there.
+func newRealtimeFECConn(inner net.PacketConn, lossFn func() float64) *fecConn {
+	return newFECConnFlush(inner, lossFn, 6*time.Millisecond)
+}
+
+func newFECConnFlush(inner net.PacketConn, lossFn func() float64, flush time.Duration) *fecConn {
 	c := &fecConn{
 		inner:    inner,
 		codec:    newFECCodec(),
 		ctrl:     newTierController(5 * time.Second),
 		lossFn:   lossFn,
 		data:     10,
-		flush:    15 * time.Millisecond,
+		flush:    flush,
 		send:     map[string]*fecSendBlock{},
 		saddr:    map[string]net.Addr{},
 		reasm:    map[string]*blockReassembler{},
