@@ -90,7 +90,7 @@ func (c *Client) session() (*smux.Session, error) {
 		_ = c.ks.Close()
 		c.ks, c.sess = nil, nil
 	}
-	ks, err := kcp.NewConn3(rand.Uint32(), c.server, nil, 0, 0, c.demux.KCP())
+	ks, err := kcp.NewConn3(rand.Uint32(), c.server, nil, fecDataShards, fecParityShards, c.demux.KCP())
 	if err != nil {
 		return nil, err
 	}
