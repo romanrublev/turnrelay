@@ -1,9 +1,43 @@
 package exit
 
 import (
+	"encoding/binary"
+	"hash/fnv"
+	"io"
 	"sync"
 	"time"
 )
+
+// flowID derives a stable per-flow key from the association id and the peer
+// addresses that identify one UDP conversation, so reordering keeps distinct
+// conversations independent.
+func flowID(assoc uint16, peers ...string) uint64 {
+	h := fnv.New64a()
+	var a [2]byte
+	binary.BigEndian.PutUint16(a[:], assoc)
+	_, _ = h.Write(a[:])
+	for _, p := range peers {
+		_, _ = io.WriteString(h, p)
+		_, _ = h.Write([]byte{0})
+	}
+	return h.Sum64()
+}
+
+// prependSeq/splitSeq carry the per-flow sequence in a 4-byte prefix on the
+// UDP-FEC pipe, so the frame codec (EncodeUDPFrame) stays unchanged.
+func prependSeq(seq uint32, frame []byte) []byte {
+	out := make([]byte, 4+len(frame))
+	binary.BigEndian.PutUint32(out[:4], seq)
+	copy(out[4:], frame)
+	return out
+}
+
+func splitSeq(b []byte) (uint32, []byte, bool) {
+	if len(b) < 4 {
+		return 0, nil, false
+	}
+	return binary.BigEndian.Uint32(b[:4]), b[4:], true
+}
 
 // Per-flow reordering for the striped UDP path. Datagrams of one flow leave the
 // sender in order, but the N-worker relay pipe reorders them; uncorrected, the

@@ -31,6 +31,8 @@ type Client struct {
 	server  net.Addr
 	demux   *Demux
 	udpPipe net.PacketConn // demux.UDP() wrapped in adaptive FEC (realtime flush)
+	useq    *flowSequencer // per-flow send sequence for UDP reordering
+	reorder *reorderBuffer // per-flow receive reordering for UDP
 	o       ClientOptions
 
 	mu   sync.Mutex
@@ -53,6 +55,8 @@ func NewClient(pipe net.PacketConn, server net.Addr, o ClientOptions) *Client {
 	// FEC-protect the UDP passthrough too (adaptive block FEC, short flush for
 	// real-time), so datagram apps get the same loss recovery as the KCP path.
 	c.udpPipe = newRealtimeFECConn(c.demux.UDP(), c.demux.LossRate)
+	c.useq = newFlowSequencer()
+	c.reorder = newReorderBuffer(defaultReleaseAfter)
 	c.next = uint16(rand.Uint32())
 	go c.udpLoop()
 	return c
@@ -161,7 +165,11 @@ func (c *Client) udpLoop() {
 		if err != nil {
 			return
 		}
-		id, from, payload, err := DecodeUDPFrame(buf[:n])
+		seq, frame, ok := splitSeq(buf[:n])
+		if !ok {
+			continue
+		}
+		id, from, payload, err := DecodeUDPFrame(frame)
 		if err != nil {
 			continue
 		}
@@ -171,11 +179,15 @@ func (c *Client) udpLoop() {
 		if a == nil {
 			continue
 		}
-		pkt := make([]byte, len(payload))
-		copy(pkt, payload)
-		select {
-		case a.in <- packet{b: pkt, addr: from.UDPAddr()}:
-		default:
+		// Reorder per flow (assoc + reply source) before delivering, so the
+		// striped pipe's reordering does not reach the app as jitter or loss.
+		flow := flowID(id, from.String())
+		fromAddr := from.UDPAddr()
+		for _, p := range c.reorder.push(flow, seq, payload, time.Now()) {
+			select {
+			case a.in <- packet{b: p, addr: fromAddr}:
+			default:
+			}
 		}
 	}
 }
@@ -203,11 +215,14 @@ func (a *clientAssoc) ReadFrom(b []byte) (int, net.Addr, error) {
 }
 
 func (a *clientAssoc) WriteTo(b []byte, addr net.Addr) (int, error) {
-	frame, err := EncodeUDPFrame(a.id, M.SocksaddrFromNet(addr), b)
+	dest := M.SocksaddrFromNet(addr)
+	frame, err := EncodeUDPFrame(a.id, dest, b)
 	if err != nil {
 		return 0, err
 	}
-	if _, err := a.c.udpPipe.WriteTo(frame, a.c.server); err != nil {
+	// Stamp a per-flow sequence so the server can reorder this conversation.
+	seq := a.c.useq.next(flowID(a.id, dest.String()))
+	if _, err := a.c.udpPipe.WriteTo(prependSeq(seq, frame), a.c.server); err != nil {
 		return 0, err
 	}
 	return len(b), nil

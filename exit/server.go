@@ -58,6 +58,8 @@ type Server struct {
 	o       ServerOptions
 	demux   *Demux
 	udpPipe net.PacketConn // demux.UDP() wrapped in adaptive FEC (realtime flush)
+	useq    *flowSequencer // per-flow send sequence for UDP reordering (replies)
+	reorder *reorderBuffer // per-flow receive reordering for UDP (client->dest)
 	dialer  net.Dialer
 	lc      net.ListenConfig
 	amu     sync.Mutex
@@ -121,6 +123,8 @@ func NewServer(pc net.PacketConn, o ServerOptions) *Server {
 	// FEC-protect the UDP passthrough (adaptive block FEC, short flush), the
 	// mirror of the client's udpPipe, so datagram apps get loss recovery.
 	s.udpPipe = newRealtimeFECConn(s.demux.UDP(), s.demux.LossRate)
+	s.useq = newFlowSequencer()
+	s.reorder = newReorderBuffer(defaultReleaseAfter)
 	if o.Bind != "" {
 		if ip := net.ParseIP(o.Bind); ip != nil {
 			s.dialer.LocalAddr = &net.TCPAddr{IP: ip}
@@ -272,7 +276,11 @@ func (s *Server) serveUDP(ctx context.Context) {
 		if err != nil {
 			return
 		}
-		id, dest, payload, err := DecodeUDPFrame(buf[:n])
+		seq, frame, ok := splitSeq(buf[:n])
+		if !ok {
+			continue
+		}
+		id, dest, payload, err := DecodeUDPFrame(frame)
 		if err != nil {
 			continue
 		}
@@ -281,15 +289,17 @@ func (s *Server) serveUDP(ctx context.Context) {
 			continue
 		}
 		a.last.Store(time.Now().UnixNano())
-		// Resolve and forward run in the association's own goroutine, so a
-		// slow DNS lookup stalls only this association, never other sessions.
-		// The payload is copied off the shared read buffer, then handed over
+		// Reorder this conversation (client session + assoc + dest) before
+		// forwarding, so the striped pipe's reordering does not reach the real
+		// destination as extra jitter. Resolve and forward run in the
+		// association's own goroutine; each in-order payload is handed over
 		// without blocking (drop under backpressure, datagram semantics).
-		pkt := make([]byte, len(payload))
-		copy(pkt, payload)
-		select {
-		case a.out <- udpItem{dest: dest, payload: pkt}:
-		default:
+		flow := flowID(id, peer.String(), dest.String())
+		for _, p := range s.reorder.push(flow, seq, payload, time.Now()) {
+			select {
+			case a.out <- udpItem{dest: dest, payload: p}:
+			default:
+			}
 		}
 	}
 }
@@ -333,12 +343,15 @@ func (s *Server) assocFor(ctx context.Context, peer net.Addr, id uint16, udp net
 			if err != nil {
 				return
 			}
-			frame, err := EncodeUDPFrame(id, M.SocksaddrFromNet(from), rb[:n])
+			saddr := M.SocksaddrFromNet(from)
+			frame, err := EncodeUDPFrame(id, saddr, rb[:n])
 			if err != nil {
 				continue
 			}
 			a.last.Store(time.Now().UnixNano())
-			_, _ = udp.WriteTo(frame, peer)
+			// Stamp a per-flow sequence so the client reorders replies.
+			seq := s.useq.next(flowID(id, peer.String(), saddr.String()))
+			_, _ = udp.WriteTo(prependSeq(seq, frame), peer)
 		}
 	}()
 	// sender: resolve (off the shared read loop, with a per-association cache)

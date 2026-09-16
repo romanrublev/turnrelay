@@ -102,6 +102,17 @@ func rawUDP(t *testing.T, d *Demux) net.PacketConn {
 	return c
 }
 
+// decodeReply strips the per-flow seq prefix (see prependSeq) the server adds
+// to UDP replies, then decodes the frame.
+func decodeReply(b []byte) (uint16, M.Socksaddr, []byte, error) {
+	seq, frame, ok := splitSeq(b)
+	_ = seq
+	if !ok {
+		return 0, M.Socksaddr{}, nil, ErrFrame
+	}
+	return DecodeUDPFrame(frame)
+}
+
 func TestServerTCPStreamsEcho(t *testing.T) {
 	echo := tcpEcho(t)
 	server := startServer(t, ServerOptions{AllowPrivate: true})
@@ -157,7 +168,7 @@ func TestServerUDPFramesEcho(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := u.WriteTo(frame, server); err != nil {
+	if _, err := u.WriteTo(prependSeq(0, frame), server); err != nil {
 		t.Fatal(err)
 	}
 	buf := make([]byte, 128)
@@ -166,7 +177,7 @@ func TestServerUDPFramesEcho(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assoc, from, payload, err := DecodeUDPFrame(buf[:n])
+	assoc, from, payload, err := decodeReply(buf[:n])
 	if err != nil || assoc != 7 || string(payload) != "dgram" {
 		t.Fatalf("assoc=%d from=%s payload=%q err=%v", assoc, from, payload, err)
 	}
@@ -237,7 +248,7 @@ func TestServerStopsOnCtxCancel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := u.WriteTo(frame, pc.LocalAddr()); err != nil {
+	if _, err := u.WriteTo(prependSeq(0, frame), pc.LocalAddr()); err != nil {
 		t.Fatal(err)
 	}
 	buf := make([]byte, 128)
@@ -273,14 +284,14 @@ func TestServerUDPNoHeadOfLineBlocking(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := u.WriteTo(slowFrame, server); err != nil {
+	if _, err := u.WriteTo(prependSeq(0, slowFrame), server); err != nil {
 		t.Fatal(err)
 	}
 	fastFrame, err := EncodeUDPFrame(2, M.SocksaddrFromNet(echo), []byte("fast"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := u.WriteTo(fastFrame, server); err != nil {
+	if _, err := u.WriteTo(prependSeq(0, fastFrame), server); err != nil {
 		t.Fatal(err)
 	}
 
@@ -291,7 +302,7 @@ func TestServerUDPNoHeadOfLineBlocking(t *testing.T) {
 		close(release)
 		t.Fatalf("fast association got no reply while the slow one blocked: %v", err)
 	}
-	assoc, from, payload, err := DecodeUDPFrame(buf[:n])
+	assoc, from, payload, err := decodeReply(buf[:n])
 	if err != nil || assoc != 2 || string(payload) != "fast" {
 		close(release)
 		t.Fatalf("reply assoc=%d payload=%q err=%v", assoc, payload, err)
@@ -325,7 +336,7 @@ func TestServerUDPCachesResolvedDestination(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := u.WriteTo(frame, server); err != nil {
+		if _, err := u.WriteTo(prependSeq(uint32(i), frame), server); err != nil {
 			t.Fatal(err)
 		}
 		buf := make([]byte, 64)
@@ -334,7 +345,7 @@ func TestServerUDPCachesResolvedDestination(t *testing.T) {
 		if err != nil {
 			t.Fatalf("i=%d: %v", i, err)
 		}
-		_, _, payload, err := DecodeUDPFrame(buf[:n])
+		_, _, payload, err := decodeReply(buf[:n])
 		if err != nil || len(payload) != 1 || payload[0] != byte(i) {
 			t.Fatalf("i=%d payload=%v err=%v", i, payload, err)
 		}

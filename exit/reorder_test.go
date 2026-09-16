@@ -32,8 +32,8 @@ func TestReorderRepairsSwap(t *testing.T) {
 	r := newReorderBuffer(12 * time.Millisecond)
 	now := time.Unix(0, 0)
 	var got string
-	got += payloads(r.push(1, 0, []byte("a"), now))     // deliver a
-	got += payloads(r.push(1, 2, []byte("c"), now))     // hold c (gap at 1)
+	got += payloads(r.push(1, 0, []byte("a"), now)) // deliver a
+	got += payloads(r.push(1, 2, []byte("c"), now)) // hold c (gap at 1)
 	if got != "a" {
 		t.Fatalf("after holding c, got %q, want a", got)
 	}
@@ -48,7 +48,7 @@ func TestReorderRepairsSwap(t *testing.T) {
 func TestReorderReleasesAfterTimeout(t *testing.T) {
 	r := newReorderBuffer(12 * time.Millisecond)
 	t0 := time.Unix(0, 0)
-	r.push(1, 0, []byte("a"), t0) // deliver a; expected=1
+	r.push(1, 0, []byte("a"), t0)        // deliver a; expected=1
 	out := r.push(1, 2, []byte("c"), t0) // seq 1 missing; hold c
 	if len(out) != 0 {
 		t.Fatalf("c should be held, got %d", len(out))
