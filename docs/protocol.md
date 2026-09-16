@@ -178,7 +178,7 @@ family accepts:
 | Parameter | Value |
 |---|---|
 | certificate | fresh self-signed ECDSA certificate per connection |
-| peer verification | none (`InsecureSkipVerify`) |
+| peer verification | none by default; optional certificate-fingerprint pinning (`server_fingerprint`) |
 | cipher suite | `TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256` only |
 | extended master secret | required (RFC 7627) |
 | connection id | extension offered (client sends the server's CID, requests none) |
@@ -411,11 +411,13 @@ single outage does not tax every later reconnect with the maximum wait.
   `srtp` and `dtls` mode (in `wrap` mode it sits inside the envelope). The
   relay never sees a tunnelled datagram in plaintext.
 - `srtp`: DTLS-SRTP with an ephemeral ECDHE key exchange and a fresh
-  self-signed certificate per connection. Certificates are not verified
-  (the server is identified by address, not by key), so this layer gives
-  confidentiality and forward secrecy against a passive relay but no
-  authentication of the VPS on its own. The inner WireGuard session provides
-  the authentication.
+  self-signed certificate per connection. By default certificates are not
+  verified, so on its own this layer gives confidentiality and forward secrecy
+  against a *passive* relay but no authentication of the VPS: an active on-path
+  party could terminate DTLS and read the traffic. The inner WireGuard session
+  provides the authentication in the WireGuard deployment; in exit mode, set
+  `server_fingerprint` to a persisted server certificate's SHA-256 to pin and
+  authenticate the server (the client then refuses any other certificate).
 - `wrap`: the envelope is a static symmetric key shared by all clients of a
   server. It has no forward secrecy: whoever learns the password can decrypt
   every recorded envelope. What it protects is only the DTLS session inside,
@@ -428,7 +430,10 @@ single outage does not tax every later reconnect with the maximum wait.
   traffic; nothing in `turnrelay` weakens or replaces it. In proxy-exit mode
   (section 10) there is no WireGuard: the per-allocation DTLS/SRTP is then the
   confidentiality boundary, and a pre-shared password authenticates the
-  session and gates the exit.
+  *session* (it gates the exit). The password does not authenticate the DTLS
+  channel, so against an active MITM the boundary holds only when the client
+  pins the server certificate via `server_fingerprint`; without it the boundary
+  is against a passive relay only.
 - What VK sees: the anonymous-join chain (one display name and device id
   per credential), the number of participants (one per 10 connections) and
   the relayed byte counts per allocation; with `srtp` and `wrap` the payload
@@ -518,7 +523,12 @@ leaked password cannot turn the VPS into a proxy into its own network;
 **Security in exit mode.** There is no WireGuard, so the per-allocation
 DTLS/SRTP is the confidentiality boundary (see section 8) and the pre-shared
 password is what authenticates the session and gates the exit. The password
-is a shared secret: anyone who holds it can dial through the server, so it
-must be kept secret and rotated by changing `password` on both ends. The
-private-destination deny-list is the main thing limiting the blast radius of
-a leaked password.
+authenticates the session but not the DTLS channel, so an active on-path party
+(the relay, or a network attacker) could otherwise terminate DTLS and read the
+traffic. Pin the server certificate with `server_fingerprint` (run
+`turnrelay-server -cert <path>`, which prints the fingerprint) to authenticate
+the server and close that gap; without it, confidentiality holds only against a
+passive relay. The password is a shared secret: anyone who holds it can dial
+through the server, so it must be kept secret and rotated by changing
+`password` on both ends. The private-destination deny-list is the main thing
+limiting the blast radius of a leaked password.

@@ -35,9 +35,11 @@ Options: `provider` (`vk` default, or `static`), `call_link` / `call_links`,
 `server` / `server_port` (the VPS running the relay-side server, an IP),
 `connections` (default 30, max 60), `mode` (`srtp` default, `wrap`, `dtls`),
 `password` (`wrap`, and required for `server_type: "exit"`), `server_type`
-(`wireguard` default, or `exit`), `captcha` (`auto` default, `fail`, `wait`),
-`udp` (default true). `detour` and `bind_interface` on the outbound apply to
-the sockets towards the VK API and the relay.
+(`wireguard` default, or `exit`), `server_fingerprint` (exit mode: the exit
+server's DTLS certificate SHA-256 as hex, which pins and authenticates the
+server against an on-path MITM; see below), `captcha` (`auto` default, `fail`,
+`wait`), `udp` (default true). `detour` and `bind_interface` on the outbound
+apply to the sockets towards the VK API and the relay.
 
 ## Exit mode (no WireGuard)
 
@@ -64,6 +66,22 @@ and no `wireguard` endpoint is needed.
 
 `server_type` defaults to `wireguard` (the detour setup above). In `exit`
 mode `password` is required.
+
+### Authenticating the exit server (recommended)
+
+Exit-mode DTLS is unauthenticated by default, so an on-path party (the TURN
+relay itself, or a network attacker) could terminate DTLS, read all proxied
+traffic, and capture the session token. To prevent this, pin the server's
+certificate:
+
+1. Run the server with a persisted certificate: `turnrelay-server -cert
+   /etc/turnrelay/cert.pem ...`. It prints its certificate fingerprint at
+   startup (`DTLS certificate fingerprint: <hex>`).
+2. Put that hex in the outbound as `"server_fingerprint": "<hex>"`.
+
+The client then verifies the server's certificate and refuses any other. This
+is how WebRTC authenticates DTLS, so the call-media disguise is unaffected.
+Without `server_fingerprint` the legacy unauthenticated behaviour is kept.
 
 ## Building a custom sing-box
 

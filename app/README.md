@@ -18,10 +18,15 @@ and produces `bin/turnrelay`.
 sudo ./bin/turnrelay install
 ```
 
-This writes a launchd daemon (`/Library/LaunchDaemons/xyz.rublev.turnrelayd.plist`)
-that runs `turnrelay daemon` at boot, and records your uid as the control-socket
-owner so your unprivileged CLI commands can talk to the privileged daemon. Run
-`sudo ./bin/turnrelay uninstall` to remove it.
+This copies the binary to a root-owned location
+(`/Library/PrivilegedHelperTools/xyz.rublev.turnrelayd`) and writes a launchd
+daemon (`/Library/LaunchDaemons/xyz.rublev.turnrelayd.plist`) that runs it as
+`daemon` at boot. Pointing the root service at a root-owned copy, rather than at
+the binary you built in a user-writable directory, is deliberate: a root daemon
+whose program file an unprivileged user can overwrite is a local root
+escalation. `install` records your uid as the control-socket owner so your
+unprivileged CLI commands can talk to the privileged daemon. Run `sudo
+./bin/turnrelay uninstall` to remove it.
 
 ## Configure
 
@@ -53,6 +58,14 @@ Fields:
 - `wg_private_key` - this client's WireGuard private key.
 - `wg_peer_public_key` - the VPS-side WireGuard peer public key.
 - `wg_address` - this client's WireGuard tunnel address (CIDR).
+
+Exit mode (no WireGuard, `turnrelay-server` on the VPS) instead sets:
+- `server_type` - `"exit"` (default `"wireguard"`).
+- `password` - the pre-shared exit-server password.
+- `server_fingerprint` - optional but recommended: the exit server's DTLS
+  certificate SHA-256 (hex), printed by `turnrelay-server -cert`. When set, the
+  client pins it and authenticates the server against an on-path MITM. The
+  `wg_*` fields are unused in exit mode.
 
 ## Use
 
