@@ -9,7 +9,8 @@ import (
 )
 
 type Profile struct {
-	Link            string `json:"link"`
+	Link            string   `json:"link,omitempty"`
+	Links           []string `json:"links,omitempty"`
 	Server          string `json:"server"`
 	Connections     int    `json:"connections"`
 	Mode            string `json:"mode"`
@@ -52,8 +53,8 @@ func Load(path string) (Profile, error) {
 }
 
 func (p Profile) Validate() error {
-	if p.Link == "" {
-		return errors.New("profile: link is empty")
+	if p.Link == "" && len(p.Links) == 0 {
+		return errors.New("profile: set link or links (at least one VK call link)")
 	}
 	if p.Server == "" {
 		return errors.New("profile: server is empty")

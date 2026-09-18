@@ -31,11 +31,18 @@ func Build(p profile.Profile) ([]byte, error) {
 	relay := map[string]any{
 		"type": "turnrelay", "tag": "relay",
 		"provider":    "vk",
-		"call_link":   p.Link,
 		"server":      host,
 		"server_port": port,
 		"connections": p.Connections,
 		"mode":        p.Mode,
+	}
+	// One or several VK call links: more links means more credentials, hence
+	// more workers and resilience to a single link's join limit.
+	if p.Link != "" {
+		relay["call_link"] = p.Link
+	}
+	if len(p.Links) > 0 {
+		relay["call_links"] = p.Links
 	}
 
 	// final is the outbound that carries all captured traffic: the WireGuard
