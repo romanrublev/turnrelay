@@ -213,3 +213,33 @@ func TestFetchCaptchaDisabled(t *testing.T) {
 		}
 	}
 }
+
+// TestParseCaptchaBootstrapIIFEArgCount is a regression guard: VK changes how
+// many arguments the obfuscated IIFE takes (a fourth appeared on 2026-09-30),
+// and a parser pinned to an exact count stops solving the captcha silently -
+// credential fetches then fail and the worker pool thins out. Only the PoW
+// input and the difficulty are load-bearing, whatever follows them.
+func TestParseCaptchaBootstrapIIFEArgCount(t *testing.T) {
+	cases := []struct {
+		name string
+		tail string
+	}{
+		{"two args", `}("pow-seed-42",3));`},
+		{"three args (classic)", `}("pow-seed-42",3,"pow_timeout"));`},
+		{"four args (2026-09-30)", `}("pow-seed-42",3,"pow_timeout",0));`},
+		{"five args", `}("pow-seed-42",3,"pow_timeout",0,true));`},
+		{"arg carrying parentheses", `}("pow-seed-42",3,"pow_timeout",f(1),{a:1}));`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			html := `<script>window['captchaPowResult']='v2.'+x;` + "\n" + c.tail + `</script>`
+			b, err := parseCaptchaBootstrapHTML(html)
+			if err != nil {
+				t.Fatalf("%s: %v", c.tail, err)
+			}
+			if b.PowInput != "pow-seed-42" || b.Difficulty != 3 {
+				t.Fatalf("%s: got input %q difficulty %d", c.tail, b.PowInput, b.Difficulty)
+			}
+		})
+	}
+}

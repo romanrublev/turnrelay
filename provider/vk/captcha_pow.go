@@ -68,16 +68,23 @@ type captchaBootstrap struct {
 }
 
 var (
-	// The obfuscated IIFE ends with its arguments: }("<input>", <difficulty>, "pow_timeout"))
-	rePowIIFEArgs    = regexp.MustCompile(`\}\(\s*["']([A-Za-z0-9+/=_-]{8,})["']\s*,\s*(\d+)\s*,\s*["'][^"']*["']\s*\)\s*\)`)
-	rePowLegacyInput = regexp.MustCompile(`const\s+powInput\s*=\s*"([^"]+)"`)
-	rePowLegacyDiff  = regexp.MustCompile(`startsWith\('0'\.repeat\((\d+)\)\)|const\s+difficulty\s*=\s*(\d+)`)
-	rePowPrefix      = regexp.MustCompile(`captchaPowResult["'\]]{0,3}\s*=\s*["']([A-Za-z0-9._-]{0,8})["']\s*\+`)
-	rePowTelemetry   = regexp.MustCompile(`["']tel_hash["']\s*:`)
-	reVKGlobalStart  = regexp.MustCompile(`window\.vk\s*=\s*\{`)
-	reVKGlobalUUID   = regexp.MustCompile(`[A-Za-z_$][\w$]*\s*:\s*"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"`)
-	reVKGlobalLang   = regexp.MustCompile(`\blang\s*:\s*(\d+)\b`)
-	errNoPow         = errors.New("vk: captcha page carries no proof-of-work parameters")
+	// The obfuscated IIFE ends with its arguments: }("<input>", <difficulty>, ...).
+	// Only the first two are load-bearing; VK keeps changing how many it passes
+	// (a fourth appeared on 2026-09-30), and a parser that demanded an exact
+	// count silently stopped solving the captcha. rePowIIFEArgs matches the whole
+	// call with any number of simple trailing arguments; rePowIIFEArgsLoose drops
+	// the requirement to see the call's end at all, for a shape whose arguments
+	// carry parentheses of their own.
+	rePowIIFEArgs      = regexp.MustCompile(`\}\(\s*["']([A-Za-z0-9+/=_-]{8,})["']\s*,\s*(\d+)\s*(?:,[^()]*)?\)\s*\)`)
+	rePowIIFEArgsLoose = regexp.MustCompile(`\}\(\s*["']([A-Za-z0-9+/=_-]{8,})["']\s*,\s*(\d+)\s*[,)]`)
+	rePowLegacyInput   = regexp.MustCompile(`const\s+powInput\s*=\s*"([^"]+)"`)
+	rePowLegacyDiff    = regexp.MustCompile(`startsWith\('0'\.repeat\((\d+)\)\)|const\s+difficulty\s*=\s*(\d+)`)
+	rePowPrefix        = regexp.MustCompile(`captchaPowResult["'\]]{0,3}\s*=\s*["']([A-Za-z0-9._-]{0,8})["']\s*\+`)
+	rePowTelemetry     = regexp.MustCompile(`["']tel_hash["']\s*:`)
+	reVKGlobalStart    = regexp.MustCompile(`window\.vk\s*=\s*\{`)
+	reVKGlobalUUID     = regexp.MustCompile(`[A-Za-z_$][\w$]*\s*:\s*"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"`)
+	reVKGlobalLang     = regexp.MustCompile(`\blang\s*:\s*(\d+)\b`)
+	errNoPow           = errors.New("vk: captcha page carries no proof-of-work parameters")
 )
 
 func parseCaptchaBootstrapHTML(html string) (captchaBootstrap, error) {
@@ -89,7 +96,11 @@ func parseCaptchaBootstrapHTML(html string) (captchaBootstrap, error) {
 		b.Envelope = envelopeTelemetry5
 	}
 	b.DebugInfo, b.Lang = parseVKGlobal(html)
-	if m := rePowIIFEArgs.FindStringSubmatch(html); len(m) >= 3 {
+	for _, re := range []*regexp.Regexp{rePowIIFEArgs, rePowIIFEArgsLoose} {
+		m := re.FindStringSubmatch(html)
+		if len(m) < 3 {
+			continue
+		}
 		d, err := strconv.Atoi(m[2])
 		if err != nil || d <= 0 || d > powMaxDiff {
 			return b, fmt.Errorf("vk: captcha pow difficulty %q out of range", m[2])
