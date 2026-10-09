@@ -247,3 +247,82 @@ func TestSupervisorEvictionRetiresRelay(t *testing.T) {
 	}
 	t.Fatalf("eviction not wired: failedRelays=%d active=%d", rc.failedRelays(), p.active.Load())
 }
+
+// stallConn accepts a few writes (the hello) and then wedges: Write blocks
+// until the conn is closed, the way a relay that stopped taking bytes behaves.
+// Reads block too, so nothing else can notice the worker is carrying nothing.
+type stallConn struct {
+	allow   int32
+	written atomic.Int32
+	done    chan struct{}
+	once    sync.Once
+	dl      *deadline.Deadline
+}
+
+func (c *stallConn) Write(b []byte) (int, error) {
+	if c.written.Add(1) <= c.allow {
+		return len(b), nil
+	}
+	<-c.done // the relay stopped accepting bytes
+	return 0, net.ErrClosed
+}
+
+func (c *stallConn) Read([]byte) (int, error) {
+	select {
+	case <-c.done:
+		return 0, net.ErrClosed
+	case <-c.dl.Done():
+		return 0, os.ErrDeadlineExceeded
+	}
+}
+
+func (c *stallConn) Close() error {
+	c.once.Do(func() { close(c.done) })
+	return nil
+}
+func (c *stallConn) LocalAddr() net.Addr               { return &net.UDPAddr{} }
+func (c *stallConn) RemoteAddr() net.Addr              { return &net.UDPAddr{} }
+func (c *stallConn) SetDeadline(t time.Time) error     { return c.SetReadDeadline(t) }
+func (c *stallConn) SetReadDeadline(t time.Time) error { c.dl.Set(t); return nil }
+func (c *stallConn) SetWriteDeadline(time.Time) error  { return nil } // like the real obfs conns
+
+type stallWrapper struct{ allow int32 }
+
+func (w *stallWrapper) Client(_ context.Context, underlay net.PacketConn, _ net.Addr) (net.Conn, error) {
+	_ = underlay.Close()
+	return &stallConn{allow: w.allow, done: make(chan struct{}), dl: deadline.New()}, nil
+}
+
+// TestWorkerRestartsOnStalledRelayWrite: a relay that takes the hello and then
+// stops accepting bytes used to wedge every writer on the worker - the uplink
+// held a stolen datagram, and the probe loop blocked, which silenced both the
+// health estimator and the zombie check, so the worker sat "active" forever.
+// The write watchdog must judge it and restart the session.
+func TestWorkerRestartsOnStalledRelayWrite(t *testing.T) {
+	ts := turntest.Start(t)
+	p := New(Options{
+		Workers: 1, Peer: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1},
+		Wrapper:       &stallWrapper{allow: 1}, // the hello lands, everything after wedges
+		Creds:         staticCreds{provider.Credential{Username: ts.Username, Password: ts.Password, Relays: []string{ts.Addr()}}},
+		TURNUDP:       true,
+		ProbeInterval: 200 * time.Millisecond, HealthProbeInterval: 100 * time.Millisecond,
+		ZombieAfter: time.Hour, // the zombie path must not be what saves us
+		StartPacing: 10 * time.Millisecond,
+		BackoffMin:  50 * time.Millisecond, BackoffMax: 200 * time.Millisecond,
+		SuperviseInterval: time.Hour, // nor the supervisor's eviction
+		Logf:              t.Logf,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	t.Cleanup(p.Close)
+	p.Start(ctx)
+
+	deadlineAt := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadlineAt) {
+		if p.Stats().Restarts > 0 {
+			return // the stalled relay was judged and the session restarted
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("stalled relay never restarted the worker: %+v", p.Stats())
+}

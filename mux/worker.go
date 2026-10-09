@@ -16,6 +16,11 @@ import (
 // supervisor retires its relay. once() maps it to a deliberate teardown.
 var errEvicted = errors.New("mux: worker evicted by supervisor")
 
+// errWriteStalled is what the write watchdog reports when a relay stopped
+// taking bytes: the session is torn down so the blocked write unwinds and the
+// worker reconnects, instead of sitting "active" and carrying nothing.
+var errWriteStalled = errors.New("mux: relay stopped accepting writes")
+
 type worker struct {
 	id   int
 	pool *Pool
@@ -113,12 +118,46 @@ func (w *worker) once(ctx context.Context) (reached bool, err error) {
 	}
 	defer conn.Close()
 
-	if _, err := conn.Write(EncodeHello(p.session)); err != nil {
-		return false, err
+	// Writers to this conn get a guard each, and a watchdog judges a relay that
+	// stops taking bytes. Without it a blocked write wedges every writer behind
+	// it (the obfs conns serialise writes and ignore write deadlines), which
+	// also silences the probe loop feeding the health estimator and the zombie
+	// check, so nothing else would ever notice. The watchdog closes the conn
+	// itself: that is what unwedges the stuck write, including one in the hello
+	// below, before the worker is even active.
+	errCh := make(chan error, 5)
+	var uplinkWrite, probeWrite writeGuard
+	go func() {
+		t := time.NewTicker(writeWatchInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-wctx.Done():
+				errCh <- nil
+				return
+			case now := <-t.C:
+				if d, bad := stalled(now, writeStallAfter, &uplinkWrite, &probeWrite); bad {
+					p.o.Logf("mux: worker %d: relay write stuck for %v, restarting", w.id, d.Truncate(time.Millisecond))
+					_ = conn.Close()
+					errCh <- errWriteStalled
+					return
+				}
+			}
+		}
+	}()
+
+	probeWrite.begin(time.Now())
+	_, helloErr := conn.Write(EncodeHello(p.session))
+	probeWrite.end()
+	if helloErr != nil {
+		return false, helloErr
 	}
 	if p.authTag != nil {
-		if _, err := conn.Write(EncodeAuth(p.authTag)); err != nil {
-			return false, err
+		probeWrite.begin(time.Now())
+		_, authErr := conn.Write(EncodeAuth(p.authTag))
+		probeWrite.end()
+		if authErr != nil {
+			return false, authErr
 		}
 	}
 	reached = true
@@ -135,7 +174,6 @@ func (w *worker) once(ctx context.Context) (reached bool, err error) {
 
 	var lastInbound atomic.Int64
 	lastInbound.Store(time.Now().UnixNano())
-	errCh := make(chan error, 4)
 
 	// Drop any eviction signal left over from a previous session, then watch
 	// for a fresh one from the supervisor.
@@ -168,7 +206,10 @@ func (w *worker) once(ctx context.Context) (reached bool, err error) {
 					errCh <- nil
 					return
 				}
-				if _, err := conn.Write(pkt); err != nil {
+				uplinkWrite.begin(time.Now())
+				_, err := conn.Write(pkt)
+				uplinkWrite.end()
+				if err != nil {
 					p.requeue(ctx, pkt)
 					errCh <- err
 					return
@@ -233,12 +274,18 @@ func (w *worker) once(ctx context.Context) (reached bool, err error) {
 				now := time.Now()
 				health.sentProbe(seq, now)
 				health.tick(now) // sweep older unanswered probes into loss
-				if _, err := conn.Write(EncodeProbe(seq)); err != nil {
+				probeWrite.begin(now)
+				_, err := conn.Write(EncodeProbe(seq))
+				probeWrite.end()
+				if err != nil {
 					errCh <- err
 					return
 				}
 			case <-kt.C:
-				if _, err := conn.Write(EncodeHello(p.session)); err != nil {
+				probeWrite.begin(time.Now())
+				_, err := conn.Write(EncodeHello(p.session))
+				probeWrite.end()
+				if err != nil {
 					errCh <- err
 					return
 				}
