@@ -47,8 +47,11 @@ class Turnrelay < Formula
         turnrelay status
         turnrelay down
 
-      Profile fields (link, server, connections, mode, wg_private_key,
-      wg_peer_public_key, wg_address, optional log_level): see #{homepage}.
+      Profile fields: server, connections, mode, one or more VK call links
+      (link, or links as an array), optional log_level. For the default
+      WireGuard transport also wg_private_key, wg_peer_public_key, wg_address;
+      for an exit server instead server_type "exit", password and the optional
+      server_fingerprint that pins the server. See #{homepage}.
 
       To remove the service: sudo turnrelay uninstall
     EOS

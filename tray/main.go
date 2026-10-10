@@ -50,6 +50,9 @@ func onReady() {
 			if s.Evictions > 0 {
 				line += fmt.Sprintf("  evicted %d", s.Evictions)
 			}
+			if s.Handovers > 0 {
+				line += fmt.Sprintf("  handovers %d", s.Handovers)
+			}
 			mStatus.SetTitle(line)
 			mToggle.SetTitle("Disconnect")
 		default:
