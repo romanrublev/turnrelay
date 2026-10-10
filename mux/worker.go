@@ -21,6 +21,11 @@ var errEvicted = errors.New("mux: worker evicted by supervisor")
 // worker reconnects, instead of sitting "active" and carrying nothing.
 var errWriteStalled = errors.New("mux: relay stopped accepting writes")
 
+// errHandover is what the handover watcher reports when the path under the
+// pool changed. The relay is not at fault, so the session is simply rebuilt on
+// the new path without cooling the relay or climbing the backoff ladder.
+var errHandover = errors.New("mux: path changed, re-establishing")
+
 type worker struct {
 	id   int
 	pool *Pool
@@ -39,6 +44,17 @@ func (w *worker) run(ctx context.Context) {
 			return
 		}
 		w.pool.restarts.Add(1)
+		if errors.Is(err, errHandover) {
+			// The path changed under us: rebuild at once, only spread across
+			// the pool so the relay does not see one burst.
+			backoff = 0
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(jitter(handoverBackoff)):
+			}
+			continue
+		}
 		healthy := reached || time.Since(start) > w.pool.o.BackoffMax
 		backoff = nextBackoff(backoff, healthy, w.pool.o.BackoffMin, w.pool.o.BackoffMax)
 		if err != nil {
@@ -181,12 +197,22 @@ func (w *worker) once(ctx context.Context) (reached bool, err error) {
 	case <-p.evict[w.id]:
 	default:
 	}
+	// Drop a stale handover signal the same way, then watch for both: an
+	// eviction (this relay is bad) and a handover (the path is gone). The
+	// handover closes the conn, since a write onto a vanished path can block.
+	select {
+	case <-p.restart[w.id]:
+	default:
+	}
 	go func() {
 		select {
 		case <-wctx.Done():
 			errCh <- nil
 		case <-p.evict[w.id]:
 			errCh <- errEvicted
+		case <-p.restart[w.id]:
+			_ = conn.Close()
+			errCh <- errHandover
 		}
 	}()
 

@@ -326,3 +326,47 @@ func TestWorkerRestartsOnStalledRelayWrite(t *testing.T) {
 	}
 	t.Fatalf("stalled relay never restarted the worker: %+v", p.Stats())
 }
+
+// TestHandoverRestartsWithoutCoolingRelays: when the path changes, every
+// session must be rebuilt promptly - not after the zombie timeout - and the
+// relays must not be blamed for it, so none is cooled and the pool comes back
+// to full strength.
+func TestHandoverRestartsWithoutCoolingRelays(t *testing.T) {
+	ts := turntest.Start(t)
+	w := &echoWrapper{}
+	rc := &recordingCreds{cred: provider.Credential{Username: ts.Username, Password: ts.Password, Relays: []string{ts.Addr()}}}
+	p := New(Options{
+		Workers: 2, Peer: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1}, Wrapper: w,
+		Creds: rc, TURNUDP: true,
+		ProbeInterval: 200 * time.Millisecond, HealthProbeInterval: 100 * time.Millisecond,
+		ZombieAfter: time.Hour, // the zombie path must not be what saves us
+		StartPacing: 10 * time.Millisecond,
+		BackoffMin:  2 * time.Second, BackoffMax: 60 * time.Second, // the ladder must not apply
+		SuperviseInterval: time.Hour, // nor the supervisor
+		Logf:              t.Logf,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	t.Cleanup(p.Close)
+	p.Start(ctx)
+	if err := p.WaitReady(ctx, 2); err != nil {
+		t.Fatal(err)
+	}
+	before := p.Stats().Restarts
+
+	p.Handover("test: wifi to lte")
+
+	// Both sessions rebuild well inside the 2s BackoffMin the ladder would
+	// otherwise impose, and inside a zombie timeout by orders of magnitude.
+	deadlineAt := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadlineAt) {
+		if p.Stats().Restarts >= before+2 && p.Stats().Active == 2 {
+			if n := rc.failedRelays(); n != 0 {
+				t.Fatalf("handover cooled %d relays; the path changed, not the relay", n)
+			}
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("handover did not rebuild the pool: %+v (restarts before %d)", p.Stats(), before)
+}

@@ -65,6 +65,9 @@ func cmdStatus(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "%s  workers=%d  egress=%s  handshake=%v", state, st.Workers, st.Egress, st.HandshakeOK)
 	if st.Running {
 		fmt.Fprintf(stdout, "  evictions=%d  worst_loss=%.1f%%  rtt=%dms", st.Evictions, st.MaxLossPct, st.MeanRTTMs)
+		if st.Handovers > 0 {
+			fmt.Fprintf(stdout, "  handovers=%d", st.Handovers)
+		}
 	}
 	fmt.Fprintln(stdout)
 	return 0

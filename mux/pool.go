@@ -141,7 +141,9 @@ type Pool struct {
 	closed     chan struct{}
 	health     []*workerHealth // per-worker, indexed by worker id; set in Start
 	evict      []chan struct{} // per-worker eviction signal; set in Start
+	restart    []chan struct{} // per-worker handover signal; set in Start
 	evictions  atomic.Int32    // cumulative relays retired by the supervisor
+	handovers  atomic.Int32    // cumulative path changes the pool reacted to
 }
 
 func New(o Options) *Pool {
@@ -162,12 +164,16 @@ func (p *Pool) Start(ctx context.Context) {
 	ctx, p.cancel = context.WithCancel(ctx)
 	p.health = make([]*workerHealth, p.o.Workers)
 	p.evict = make([]chan struct{}, p.o.Workers)
+	p.restart = make([]chan struct{}, p.o.Workers)
 	for i := range p.health {
 		p.health[i] = newWorkerHealth()
 		p.evict[i] = make(chan struct{}, 1)
+		p.restart[i] = make(chan struct{}, 1)
 	}
 	p.wg.Add(1)
 	go func() { defer p.wg.Done(); p.supervise(ctx) }()
+	p.wg.Add(1)
+	go func() { defer p.wg.Done(); p.watchWake(ctx) }()
 	for i := 0; i < p.o.Workers; i++ {
 		w := &worker{id: i, pool: p}
 		p.wg.Add(1)
@@ -251,8 +257,51 @@ func (p *Pool) logHealthGauge(snaps []healthSnapshot) {
 	if rttN > 0 {
 		meanRTTMs = int((rttSum / time.Duration(rttN)) / time.Millisecond)
 	}
-	p.o.Logf("mux: health active=%d evictions=%d max_loss_bp=%d mean_rtt_ms=%d",
-		active, int(p.evictions.Load()), int(maxLoss*10000), meanRTTMs)
+	p.o.Logf("mux: health active=%d evictions=%d max_loss_bp=%d mean_rtt_ms=%d handovers=%d",
+		active, int(p.evictions.Load()), int(maxLoss*10000), meanRTTMs, int(p.handovers.Load()))
+}
+
+// Handover drops every worker's session at once and lets them reconnect
+// promptly. Call it when the path under the pool changed: each TURN allocation
+// is bound to the old source address and is dead, but writes to a gone path
+// usually still succeed locally, so without this the pool waits for the zombie
+// timeout to notice minutes later. The relays are not at fault, so nothing is
+// cooled and the backoff ladder does not apply.
+func (p *Pool) Handover(reason string) {
+	select {
+	case <-p.closed:
+		return
+	default:
+	}
+	p.handovers.Add(1)
+	p.o.Logf("mux: handover (%s): dropping %d sessions to re-establish on the new path", reason, len(p.restart))
+	for _, ch := range p.restart {
+		select {
+		case ch <- struct{}{}:
+		default: // a handover is already pending for this worker
+		}
+	}
+}
+
+// watchWake notices that the process was suspended (a laptop asleep) and
+// treats the wake as a handover: after sleep every allocation is stale, and
+// the machine may well be on a different network than when it dozed off.
+func (p *Pool) watchWake(ctx context.Context) {
+	det := newWakeDetector(wakeGap)
+	t := time.NewTicker(wakeTickInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-p.closed:
+			return
+		case now := <-t.C:
+			if det.tick(now) {
+				p.Handover("woke from sleep")
+			}
+		}
+	}
 }
 
 func (p *Pool) Close() {

@@ -43,6 +43,7 @@ func (e *Engine) Start(configJSON []byte) error {
 	e.counters.MeanRTTMs.Store(0)
 	e.counters.ActiveWorkers.Store(0)
 	e.counters.GaugeSeen.Store(false)
+	e.counters.Handovers.Store(0)
 
 	outboundRegistry := include.OutboundRegistry()
 	turnrelaybox.RegisterOutbound(outboundRegistry)
@@ -86,6 +87,7 @@ func (e *Engine) Stop() {
 	e.counters.MeanRTTMs.Store(0)
 	e.counters.ActiveWorkers.Store(0)
 	e.counters.GaugeSeen.Store(false)
+	e.counters.Handovers.Store(0)
 }
 
 func (e *Engine) Running() bool {
@@ -106,6 +108,7 @@ func (e *Engine) Workers() int {
 }
 func (e *Engine) HandshakeOK() bool { return e.counters.HandshakeOK.Load() }
 func (e *Engine) Evictions() int    { return int(e.counters.Evictions.Load()) }
+func (e *Engine) Handovers() int    { return int(e.counters.Handovers.Load()) }
 func (e *Engine) MeanRTTMs() int    { return int(e.counters.MeanRTTMs.Load()) }
 
 // MaxLossPct is the worst active worker's smoothed loss as a percentage.

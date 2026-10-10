@@ -189,6 +189,14 @@ func (d *Dialer) Start(ctx context.Context) error {
 	return nil
 }
 
+// Handover tells the worker pool that the path under it changed (a different
+// Wi-Fi, a switch to mobile data, a machine that woke from sleep): every TURN
+// allocation is bound to the old source address and is dead. Without this the
+// pool waits for its zombie timeout to notice minutes later; with it the
+// sessions are rebuilt in seconds. Safe to call often - a handover already in
+// flight is not repeated.
+func (d *Dialer) Handover(reason string) { d.pool.Handover(reason) }
+
 func (d *Dialer) Close() error {
 	d.pool.Close()
 	return nil

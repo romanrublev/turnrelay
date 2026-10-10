@@ -48,3 +48,22 @@ func TestScanHealthGauge(t *testing.T) {
 		t.Fatalf("gauge not replaced: max_loss_bp=%d, want 40", c.MaxLossBp.Load())
 	}
 }
+
+// The handover count was appended to the gauge after the fact: a line that
+// carries it is read, and an older line without it still parses, leaving the
+// count alone rather than failing the whole gauge.
+func TestScanHealthGaugeHandovers(t *testing.T) {
+	var c Counters
+	scanLine("outbound/turnrelay[relay]: mux: health active=60 evictions=1 max_loss_bp=10 mean_rtt_ms=90 handovers=4", &c)
+	if c.Handovers.Load() != 4 {
+		t.Fatalf("handovers=%d, want 4", c.Handovers.Load())
+	}
+	if c.ActiveWorkers.Load() != 60 || c.MeanRTTMs.Load() != 90 {
+		t.Fatalf("other gauge fields broken: %+v", c)
+	}
+	// An older gauge line (no handovers) must still be accepted.
+	scanLine("outbound/turnrelay[relay]: mux: health active=58 evictions=1 max_loss_bp=20 mean_rtt_ms=99", &c)
+	if c.ActiveWorkers.Load() != 58 || c.MeanRTTMs.Load() != 99 {
+		t.Fatalf("legacy gauge line rejected: %+v", c)
+	}
+}

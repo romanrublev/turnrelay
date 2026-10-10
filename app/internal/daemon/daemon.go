@@ -112,6 +112,7 @@ func (d *Daemon) Status() proto.Status {
 		Evictions:   d.eng.Evictions(),
 		MaxLossPct:  d.eng.MaxLossPct(),
 		MeanRTTMs:   d.eng.MeanRTTMs(),
+		Handovers:   d.eng.Handovers(),
 	}
 }
 

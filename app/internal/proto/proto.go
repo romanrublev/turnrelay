@@ -31,6 +31,7 @@ type Status struct {
 	Evictions  int     `json:"evictions"`    // cumulative lossy relays retired
 	MaxLossPct float64 `json:"max_loss_pct"` // worst active worker's smoothed loss
 	MeanRTTMs  int     `json:"mean_rtt_ms"`  // mean active-worker relay RTT
+	Handovers  int     `json:"handovers"`    // path changes the pool re-established on
 }
 
 type Response struct {

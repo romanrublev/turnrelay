@@ -11,12 +11,12 @@ import (
 type Profile struct {
 	Link            string   `json:"link,omitempty"`
 	Links           []string `json:"links,omitempty"`
-	Server          string `json:"server"`
-	Connections     int    `json:"connections"`
-	Mode            string `json:"mode"`
-	WGPrivateKey    string `json:"wg_private_key"`
-	WGPeerPublicKey string `json:"wg_peer_public_key"`
-	WGAddress       string `json:"wg_address"`
+	Server          string   `json:"server"`
+	Connections     int      `json:"connections"`
+	Mode            string   `json:"mode"`
+	WGPrivateKey    string   `json:"wg_private_key"`
+	WGPeerPublicKey string   `json:"wg_peer_public_key"`
+	WGAddress       string   `json:"wg_address"`
 	// ServerType selects the transport: "wireguard" (default) tunnels a
 	// WireGuard endpoint through the relay; "exit" makes the relay a direct
 	// TCP/UDP proxy (KCP+smux, no WireGuard) and requires Password.

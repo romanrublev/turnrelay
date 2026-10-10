@@ -14,9 +14,12 @@ import (
 	"github.com/sagernet/sing-box/common/dialer"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
+	tun "github.com/sagernet/sing-tun"
+	"github.com/sagernet/sing/common/control"
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
+	"github.com/sagernet/sing/common/x/list"
 	"github.com/sagernet/sing/service"
 )
 
@@ -37,6 +40,11 @@ type Outbound struct {
 	exit   bool
 	mu     sync.Mutex
 	client *exit.Client // exit mode only, created in Start
+
+	// Default-interface subscription: the signal that the path changed.
+	monitor   tun.DefaultInterfaceMonitor
+	ifaceCB   *list.Element[tun.DefaultInterfaceUpdateCallback]
+	lastIface string // name of the default interface last seen, for dedupe
 }
 
 // NewOutbound builds the outbound from its JSON options. The credential pool
@@ -121,6 +129,7 @@ func (o *Outbound) Start(stage adapter.StartStage) error {
 	if err := o.dialer.Start(o.ctx); err != nil {
 		return err
 	}
+	o.watchDefaultInterface()
 	if !o.exit {
 		return nil
 	}
@@ -138,7 +147,50 @@ func (o *Outbound) Start(stage adapter.StartStage) error {
 	return nil
 }
 
+// watchDefaultInterface asks the box to tell us when the default route moves
+// (Wi-Fi to mobile data, a cable pulled, a wake onto a different network) and
+// hands that to the pool as a handover. The first callback only seeds the
+// current interface, and a callback naming the same interface is ignored:
+// sing-box also fires this while bringing its own tun up.
+func (o *Outbound) watchDefaultInterface() {
+	nm := service.FromContext[adapter.NetworkManager](o.ctx)
+	if nm == nil {
+		return
+	}
+	mon := nm.InterfaceMonitor()
+	if mon == nil {
+		return
+	}
+	o.mu.Lock()
+	if iface := mon.DefaultInterface(); iface != nil {
+		o.lastIface = iface.Name
+	}
+	o.mu.Unlock()
+	o.monitor = mon
+	o.ifaceCB = mon.RegisterCallback(func(iface *control.Interface, _ int) {
+		name := ""
+		if iface != nil {
+			name = iface.Name
+		}
+		o.mu.Lock()
+		changed := name != o.lastIface
+		o.lastIface = name
+		o.mu.Unlock()
+		if !changed {
+			return
+		}
+		if o.logger != nil {
+			o.logger.Info("turnrelay: default interface is now ", name, ", re-establishing the relay pool")
+		}
+		o.dialer.Handover("default interface is now " + name)
+	})
+}
+
 func (o *Outbound) Close() error {
+	if o.monitor != nil && o.ifaceCB != nil {
+		o.monitor.UnregisterCallback(o.ifaceCB)
+		o.ifaceCB = nil
+	}
 	o.mu.Lock()
 	c := o.client
 	o.mu.Unlock()

@@ -22,6 +22,7 @@ type Status struct {
 	Evictions   int     `json:"evictions"`
 	MaxLossPct  float64 `json:"max_loss_pct"`
 	MeanRTTMs   int     `json:"mean_rtt_ms"`
+	Handovers   int     `json:"handovers"`
 }
 
 // binaryPath is the turnrelay CLI the tray drives: $TURNRELAY_BIN if set,
