@@ -9,7 +9,7 @@ class TurnrelayTray < Formula
   on_macos do
     on_arm do
       url "https://github.com/romanrublev/turnrelay/releases/download/v0.7.0-beta/turnrelay-tray-darwin-arm64.tar.gz"
-      sha256 "b8ae3a3064975991304ed01d2ab588fb25a25da0e7117da2def3d5342c00e5ee"
+      sha256 "1957795ef8a0504b2f323491e1b0532fa72bfb92b0dc596ad9853604160a921f"
     end
   end
 
