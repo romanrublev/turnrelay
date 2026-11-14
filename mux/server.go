@@ -6,10 +6,12 @@ import (
 	"errors"
 	"net"
 	"os"
+	"slices"
 	"sync"
 	"time"
 
 	"github.com/pion/transport/v4/deadline"
+	"github.com/romanrublev/turnrelay/passwords"
 )
 
 // SessionAddr identifies one client session on the server-side pipe. It is
@@ -22,9 +24,14 @@ func (a SessionAddr) String() string  { return hex.EncodeToString(a[:]) }
 var ErrAuth = errors.New("mux: allocation failed authentication")
 
 type ServerOptions struct {
-	// Password is required: an allocation must present a valid auth frame
-	// after its hello or it is closed.
+	// Password is required (unless Passwords is set): an allocation must
+	// present a valid auth frame after its hello or it is closed.
 	Password string
+	// Passwords, when set, replaces Password: an allocation is accepted if
+	// its auth tag matches ANY password currently in the source. When a
+	// password disappears from the source, allocations that authenticated
+	// with it are closed.
+	Passwords passwords.Source
 	// ZombieAfter drops a session that has had no live allocation for this
 	// long (default 120s).
 	ZombieAfter   time.Duration
@@ -45,6 +52,9 @@ func (o *ServerOptions) defaults() {
 	}
 	if o.Logf == nil {
 		o.Logf = func(string, ...any) {}
+	}
+	if o.Passwords == nil && o.Password != "" {
+		o.Passwords = passwords.Static{o.Password}
 	}
 }
 
@@ -138,6 +148,26 @@ func (s *Server) reap() {
 	}
 }
 
+// revokeWhenRemoved cancels an allocation once the password it authenticated
+// with is no longer in the password source, so editing the password file
+// takes effect on live connections and not only on new ones.
+func (s *Server) revokeWhenRemoved(ctx context.Context, cancel context.CancelFunc, pw string, remote net.Addr) {
+	for {
+		// Take the channel before reading the list so no update is missed.
+		ch := s.o.Passwords.Changed()
+		if !slices.Contains(s.o.Passwords.List(), pw) {
+			s.o.Logf("mux: closing allocation from %s: its password was removed", remote)
+			cancel()
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ch: // nil for a static source: blocks until ctx ends
+		}
+	}
+}
+
 // Handle runs one allocation conn until it fails or ctx ends: it expects a
 // hello, then an auth frame, then relays payload up and stripes downlink
 // datagrams from the session queue, echoing probes.
@@ -158,7 +188,13 @@ func (s *Server) Handle(ctx context.Context, conn net.Conn) error {
 		return err
 	}
 	tag, ok := ParseAuth(buf[:n])
-	if !ok || !VerifyAuth(s.o.Password, session, tag) {
+	var matched string
+	if ok && s.o.Passwords != nil {
+		matched, ok = MatchPassword(s.o.Passwords.List(), session, tag)
+	} else {
+		ok = false
+	}
+	if !ok {
 		s.o.Logf("mux: auth failed for an allocation from %s", conn.RemoteAddr())
 		return ErrAuth
 	}
@@ -168,6 +204,7 @@ func (s *Server) Handle(ctx context.Context, conn net.Conn) error {
 	defer s.leave(sess)
 	wctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	go s.revokeWhenRemoved(wctx, cancel, matched, conn.RemoteAddr())
 	// The uplink/downlink goroutines below only notice wctx.Done() at their
 	// channel selects, not while blocked inside conn.Read/conn.Write. Force
 	// those syscalls to return on cancel by yanking the conn's deadline, or

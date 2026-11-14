@@ -82,6 +82,20 @@ func VerifyAuth(password string, session [16]byte, tag []byte) bool {
 	return hmac.Equal(tag, AuthTag(password, session))
 }
 
+// MatchPassword returns the password from list that produced tag for session.
+// It checks every entry, without stopping at the first match, so the time
+// taken does not reveal which position matched.
+func MatchPassword(list []string, session [16]byte, tag []byte) (string, bool) {
+	var found string
+	ok := false
+	for _, p := range list {
+		if VerifyAuth(p, session, tag) && !ok {
+			found, ok = p, true
+		}
+	}
+	return found, ok
+}
+
 func IsControl(b []byte) bool {
 	if len(b) < 4 || b[0] != 0xff {
 		return false
