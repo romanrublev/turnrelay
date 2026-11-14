@@ -207,7 +207,14 @@ sudo PASSWORD='choose-a-long-random-password' bash scripts/vps-setup-exit.sh
 
 Флаги (`turnrelay-server -h`): `-listen` (по умолчанию `:56004`), `-mode`
 (`srtp` по умолчанию, `wrap`, `dtls`), `-password` или `TURNRELAY_PASSWORD`,
-`-bind`, `-allow-private`, `-dial-timeout`, `-max-streams`, `-udp-timeout`.
+`-bind`, `-allow-private`, `-dial-timeout`, `-max-streams`, `-udp-timeout`,
+`-socks5`, `-socks5-user`, `-socks5-pass`.
+
+Чтобы направлять исходящие TCP-подключения авторизованных клиентов через
+upstream SOCKS5-прокси (например, для контроля выходного IP/политик), укажите
+`-socks5 host:port` или URL-форму `socks5://[user:pass@]host:port` (флаги
+`-socks5-user/-socks5-pass` переопределяют данные из URL). UDP-ассоциации
+устанавливаются напрямую и через SOCKS5 не проксируются.
 
 Клиенты: в sing-box установите `"server_type": "exit"` и `"password"` в
 outbound `turnrelay` и уберите endpoint `wireguard` - outbound станет обычным

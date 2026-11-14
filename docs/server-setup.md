@@ -204,7 +204,14 @@ sudo PASSWORD='choose-a-long-random-password' bash scripts/vps-setup-exit.sh
 
 Flags (`turnrelay-server -h`): `-listen` (default `:56004`), `-mode`
 (`srtp` default, `wrap`, `dtls`), `-password` or `TURNRELAY_PASSWORD`,
-`-bind`, `-allow-private`, `-dial-timeout`, `-max-streams`, `-udp-timeout`.
+`-bind`, `-allow-private`, `-dial-timeout`, `-max-streams`, `-udp-timeout`,
+`-socks5`, `-socks5-user`, `-socks5-pass`.
+
+To route outbound TCP connections of authenticated clients through an upstream
+SOCKS5 proxy (e.g. for exit IP/policy), pass `-socks5 host:port` or a URL form
+`socks5://[user:pass@]host:port` (use `-socks5-user/-socks5-pass` to override
+URL credentials). UDP associations are dialed directly and are not proxied via
+SOCKS5.
 
 Clients: in sing-box set `"server_type": "exit"` and `"password"` on the
 `turnrelay` outbound and drop the `wireguard` endpoint; the outbound is then a

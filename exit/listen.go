@@ -70,7 +70,12 @@ func Listen(ctx context.Context, cfg ListenConfig) (*Instance, error) {
 		return nil, err
 	}
 	m := mux.NewServer(mux.ServerOptions{Password: cfg.Password, ZombieAfter: cfg.ZombieAfter, Logf: cfg.Logf})
-	s := NewServer(m.PacketConn(), cfg.Server)
+	s, err := NewServer(m.PacketConn(), cfg.Server)
+	if err != nil {
+		_ = m.Close()
+		_ = l.Close()
+		return nil, err
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	inst := &Instance{l: l, m: m, s: s, cancel: cancel}
 	inst.wg.Add(2)

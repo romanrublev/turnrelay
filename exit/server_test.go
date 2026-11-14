@@ -63,7 +63,10 @@ func startServer(t *testing.T, o ServerOptions) net.Addr {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := NewServer(pc, o)
+	s, err := NewServer(pc, o)
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(func() { cancel(); s.Close() })
 	go func() { _ = s.Serve(ctx) }()
@@ -218,7 +221,10 @@ func TestServerStopsOnCtxCancel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := NewServer(pc, ServerOptions{AllowPrivate: true})
+	s, err := NewServer(pc, ServerOptions{AllowPrivate: true})
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- s.Serve(ctx) }()

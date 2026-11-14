@@ -3,6 +3,7 @@ package exit
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 	"strconv"
@@ -14,6 +15,7 @@ import (
 	M "github.com/sagernet/sing/common/metadata"
 	"github.com/xtaci/kcp-go/v5"
 	"github.com/xtaci/smux"
+	"golang.org/x/net/proxy"
 )
 
 var ErrPrivateDestination = errors.New("exit: destination is private, loopback or link-local")
@@ -24,6 +26,11 @@ type ServerOptions struct {
 	AllowPrivate bool          // serve private/loopback/link-local destinations
 	Bind         string        // optional local address for outbound sockets
 	UDPTimeout   time.Duration // idle timeout per UDP association, default 60s
+	// SOCKS5, when set, routes outbound TCP connections through this SOCKS5
+	// proxy (host:port). UDP associations are not supported through the proxy.
+	SOCKS5     string
+	SOCKS5User string
+	SOCKS5Pass string
 	// Resolver resolves an FQDN destination to IPs. nil uses the system
 	// resolver. It runs off the shared UDP read loop (per association), so a
 	// slow lookup stalls only its own association, never other sessions.
@@ -59,6 +66,7 @@ type Server struct {
 	demux   *Demux
 	udpPipe net.PacketConn // demux.UDP() wrapped in adaptive FEC (realtime flush)
 	useq    *flowSequencer // per-flow send sequence for UDP reordering (replies)
+	tcpDial func(ctx context.Context, network, addr string) (net.Conn, error)
 	reorder *reorderBuffer // per-flow receive reordering for UDP (client->dest)
 	dialer  net.Dialer
 	lc      net.ListenConfig
@@ -117,7 +125,7 @@ func (a *assoc) target(ctx context.Context, s *Server, dest M.Socksaddr) (netip.
 	return t, nil
 }
 
-func NewServer(pc net.PacketConn, o ServerOptions) *Server {
+func NewServer(pc net.PacketConn, o ServerOptions) (*Server, error) {
 	o.defaults()
 	s := &Server{o: o, demux: NewDemux(pc), assocs: map[string]*assoc{}, closed: make(chan struct{})}
 	// FEC-protect the UDP passthrough (adaptive block FEC, short flush), the
@@ -130,7 +138,41 @@ func NewServer(pc net.PacketConn, o ServerOptions) *Server {
 			s.dialer.LocalAddr = &net.TCPAddr{IP: ip}
 		}
 	}
-	return s
+	if o.SOCKS5 != "" {
+		var auth *proxy.Auth
+		if o.SOCKS5User != "" || o.SOCKS5Pass != "" {
+			auth = &proxy.Auth{User: o.SOCKS5User, Password: o.SOCKS5Pass}
+		}
+		d, err := proxy.SOCKS5("tcp", o.SOCKS5, auth, &s.dialer)
+		if err != nil {
+			return nil, fmt.Errorf("exit: socks5 upstream: %w", err)
+		}
+		if cd, ok := d.(interface {
+			DialContext(ctx context.Context, network, addr string) (net.Conn, error)
+		}); ok {
+			s.tcpDial = cd.DialContext
+		} else {
+			s.tcpDial = func(ctx context.Context, network, addr string) (net.Conn, error) {
+				type result struct {
+					c   net.Conn
+					err error
+				}
+				ch := make(chan result, 1)
+				go func() { c, err := d.Dial(network, addr); ch <- result{c, err} }()
+				select {
+				case <-ctx.Done():
+					go func() { r := <-ch; if r.c != nil { _ = r.c.Close() } }()
+					return nil, ctx.Err()
+				case r := <-ch:
+					return r.c, r.err
+				}
+			}
+		}
+		o.Logf("exit: outbound TCP via SOCKS5 %s (UDP direct, not proxied)", o.SOCKS5)
+	} else {
+		s.tcpDial = s.dialer.DialContext
+	}
+	return s, nil
 }
 
 func (s *Server) Close() error {
@@ -228,7 +270,7 @@ func (s *Server) handleStream(ctx context.Context, st *smux.Stream) {
 		s.o.Logf("exit: refuse %s: %v", dest, err)
 		return
 	}
-	rc, err := s.dialer.DialContext(dctx, "tcp", target.String())
+	rc, err := s.tcpDial(dctx, "tcp", target.String())
 	if err != nil {
 		s.o.Logf("exit: dial %s: %v", dest, err)
 		return
