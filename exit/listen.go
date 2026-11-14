@@ -10,6 +10,7 @@ import (
 
 	"github.com/romanrublev/turnrelay/mux"
 	"github.com/romanrublev/turnrelay/obfs"
+	"github.com/romanrublev/turnrelay/passwords"
 )
 
 // ListenConfig is everything the exit server needs: where to listen, which
@@ -19,6 +20,10 @@ type ListenConfig struct {
 	Address  string
 	Mode     obfs.Mode
 	Password string
+	// Passwords, when set, replaces Password: a client may use any password
+	// in the source, and the source may change while the server runs (see
+	// passwords.File).
+	Passwords passwords.Source
 	// Cert is the server's DTLS certificate. A persisted (stable) certificate
 	// has a stable obfs.CertFingerprint that clients pin; nil generates a fresh
 	// one each start, which cannot be pinned. See obfs.ListenOptions.Cert.
@@ -53,7 +58,10 @@ func (i *Instance) Close() error {
 }
 
 func Listen(ctx context.Context, cfg ListenConfig) (*Instance, error) {
-	if cfg.Password == "" {
+	if cfg.Passwords == nil && cfg.Password != "" {
+		cfg.Passwords = passwords.Static{cfg.Password}
+	}
+	if cfg.Passwords == nil || len(cfg.Passwords.List()) == 0 {
 		return nil, errors.New("exit: a password is required")
 	}
 	if cfg.Mode == "" {
@@ -65,11 +73,11 @@ func Listen(ctx context.Context, cfg ListenConfig) (*Instance, error) {
 	if cfg.Server.Logf == nil {
 		cfg.Server.Logf = cfg.Logf
 	}
-	l, err := obfs.Listen(cfg.Mode, cfg.Address, obfs.ListenOptions{Password: cfg.Password, Cert: cfg.Cert})
+	l, err := obfs.Listen(cfg.Mode, cfg.Address, obfs.ListenOptions{Passwords: cfg.Passwords, Cert: cfg.Cert})
 	if err != nil {
 		return nil, err
 	}
-	m := mux.NewServer(mux.ServerOptions{Password: cfg.Password, ZombieAfter: cfg.ZombieAfter, Logf: cfg.Logf})
+	m := mux.NewServer(mux.ServerOptions{Passwords: cfg.Passwords, ZombieAfter: cfg.ZombieAfter, Logf: cfg.Logf})
 	s := NewServer(m.PacketConn(), cfg.Server)
 	ctx, cancel := context.WithCancel(ctx)
 	inst := &Instance{l: l, m: m, s: s, cancel: cancel}

@@ -203,8 +203,34 @@ sudo PASSWORD='choose-a-long-random-password' bash scripts/vps-setup-exit.sh
 ```
 
 Flags (`turnrelay-server -h`): `-listen` (default `:56004`), `-mode`
-(`srtp` default, `wrap`, `dtls`), `-password` or `TURNRELAY_PASSWORD`,
+(`srtp` default, `wrap`, `dtls`), `-password` or `TURNRELAY_PASSWORD`, `-password-file`,
 `-bind`, `-allow-private`, `-dial-timeout`, `-max-streams`, `-udp-timeout`.
+
+### Several passwords (one per client)
+
+Instead of a single password you can give the server a file with one password
+per line and hand each client its own:
+
+```bash
+sudo install -m 600 /dev/null /etc/turnrelay/passwords
+printf '%s\n' 'alice-long-random-password' 'bob-long-random-password' | sudo tee -a /etc/turnrelay/passwords >/dev/null
+turnrelay-server -password-file /etc/turnrelay/passwords
+```
+
+- A client is accepted if its password matches **any** line. Leading/trailing
+  whitespace is trimmed, empty lines are skipped, there are no comments, and
+  `-password-file` cannot be combined with `-password`.
+- The file is re-read every 2 s (`-password-reload-interval`) and on `SIGHUP`;
+  no restart is needed. New passwords work immediately for new connections.
+- **Removing** a line also disconnects the connections that were using that
+  password. Editing the file never drops anyone else.
+- A file that becomes unreadable or empty while the server runs (an editor
+  truncating it mid-save, say) is ignored and the previous list is kept; the
+  error is logged. At startup an empty or missing file is a fatal error.
+- Keep the file `chmod 600`; the server warns if it is readable by others.
+- In `wrap` mode the obfuscation key is derived from the password, so the
+  server tries each current password against a new client's first packet.
+  Clients whose packet matches none are dropped silently.
 
 Clients: in sing-box set `"server_type": "exit"` and `"password"` on the
 `turnrelay` outbound and drop the `wireguard` endpoint; the outbound is then a

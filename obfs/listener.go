@@ -12,6 +12,7 @@ import (
 	"github.com/pion/dtls/v3"
 	"github.com/pion/dtls/v3/pkg/crypto/selfsign"
 	"github.com/pion/transport/v4/deadline"
+	"github.com/romanrublev/turnrelay/passwords"
 )
 
 // Listener is the server side of one obfuscation mode: it accepts obfuscated
@@ -29,8 +30,12 @@ type Listener struct {
 // srtp and dtls need nothing.
 type ListenOptions struct {
 	Password string
-	WrapKey  []byte
-	Video    bool
+	// Passwords, when set, replaces Password for ModeWrap: a client is
+	// accepted if its first packet decrypts under the key derived from ANY
+	// current password. The set may change while the listener runs.
+	Passwords passwords.Source
+	WrapKey   []byte
+	Video     bool
 	// Cert, when set, is the server's DTLS certificate. A stable certificate
 	// (persisted across restarts) has a stable CertFingerprint, which is what
 	// clients pin (see Options.ServerFingerprint). Nil generates a fresh
@@ -69,17 +74,22 @@ func Listen(mode Mode, address string, o ListenOptions) (*Listener, error) {
 	case ModeDTLS:
 		return listenDTLS(address, cert)
 	case ModeWrap:
-		key := o.WrapKey
-		if key == nil {
-			if o.Password == "" {
-				return nil, errors.New("obfs: wrap needs a password or wrap key")
-			}
-			key, err = DeriveWrapKey(o.Password)
+		var keys keySource
+		switch {
+		case o.WrapKey != nil:
+			keys = staticKeys{o.WrapKey}
+		case o.Passwords != nil:
+			keys = newKeyring(o.Passwords)
+		case o.Password != "":
+			key, err := DeriveWrapKey(o.Password)
 			if err != nil {
 				return nil, err
 			}
+			keys = staticKeys{key}
+		default:
+			return nil, errors.New("obfs: wrap needs a password or wrap key")
 		}
-		return listenWrap(address, cert, key, o.Video)
+		return listenWrap(address, cert, keys, o.Video)
 	case ModeSRTP:
 		return listenSRTP(address, cert)
 	default:
@@ -133,7 +143,7 @@ func listenDTLS(address string, cert tls.Certificate) (*Listener, error) {
 	return l, nil
 }
 
-func listenWrap(address string, cert tls.Certificate, key []byte, video bool) (*Listener, error) {
+func listenWrap(address string, cert tls.Certificate, keys keySource, video bool) (*Listener, error) {
 	laddr, err := net.ResolveUDPAddr("udp", address)
 	if err != nil {
 		return nil, err
@@ -145,7 +155,7 @@ func listenWrap(address string, cert tls.Certificate, key []byte, video bool) (*
 	l := &Listener{addr: raw.LocalAddr(), conns: make(chan net.Conn, 64)}
 	ctx, cancel := context.WithCancel(context.Background())
 	l.close = func() { cancel(); _ = raw.Close() }
-	go serveWrap(ctx, raw, cert, key, video, l.conns)
+	go serveWrap(ctx, raw, cert, keys, video, l.conns)
 	return l, nil
 }
 
@@ -154,7 +164,7 @@ func listenWrap(address string, cert tls.Certificate, key []byte, video bool) (*
 // source's packets to a WRAP-then-DTLS handshake. It replaces pion's
 // udp.Listener, whose internal WaitGroup is not safe against Accept racing
 // Close.
-func serveWrap(ctx context.Context, raw net.PacketConn, cert tls.Certificate, key []byte, video bool, out chan<- net.Conn) {
+func serveWrap(ctx context.Context, raw net.PacketConn, cert tls.Certificate, keys keySource, video bool, out chan<- net.Conn) {
 	ps := newPerSource(srcSessionTTL)
 	go ps.reap(ctx)
 	buf := make([]byte, 2048)
@@ -171,20 +181,23 @@ func serveWrap(ctx context.Context, raw net.PacketConn, cert tls.Certificate, ke
 
 		src := addr
 		srcKey := addr.String()
-		ps.dispatch(time.Now(), srcKey, func(_ []byte) (func([]byte), bool) {
+		ps.dispatch(time.Now(), srcKey, func(first []byte) (func([]byte), bool) {
+			// A new source is only admitted if its first packet decrypts
+			// under one of the current keys; that is how the matching
+			// password is found. Anything else is dropped without
+			// allocating a DTLS session.
+			codec := matchWrapCodec(keys.Keys(), video, first)
+			if codec == nil {
+				return nil, false
+			}
 			ch := make(chan []byte, 64)
-			go acceptWrapSession(ctx, raw, src, cert, key, video, ch, out, ps, srcKey)
+			go acceptWrapSession(ctx, raw, src, cert, codec, ch, out, ps, srcKey)
 			return func(p []byte) { trySend(ch, p) }, true
 		}, pkt)
 	}
 }
 
-func acceptWrapSession(ctx context.Context, raw net.PacketConn, src net.Addr, cert tls.Certificate, key []byte, video bool, pkts chan []byte, out chan<- net.Conn, ps *perSource, srcKey string) {
-	codec, err := NewWrapCodec(key, video)
-	if err != nil {
-		ps.remove(srcKey)
-		return
-	}
+func acceptWrapSession(ctx context.Context, raw net.PacketConn, src net.Addr, cert tls.Certificate, codec *WrapCodec, pkts chan []byte, out chan<- net.Conn, ps *perSource, srcKey string) {
 	// side delivers this source's raw packets (still WRAP-enveloped) and writes
 	// back to the shared socket; NewWrapPacketConn unwraps on read and wraps on
 	// write, and DTLS runs on top of that.
@@ -207,6 +220,72 @@ func acceptWrapSession(ctx context.Context, raw net.PacketConn, src net.Addr, ce
 	case <-ctx.Done():
 		_ = dc.Close()
 	}
+}
+
+// keySource yields the wrap keys the server currently accepts.
+type keySource interface {
+	Keys() [][]byte
+}
+
+type staticKeys [][]byte
+
+func (k staticKeys) Keys() [][]byte { return k }
+
+// matchWrapCodec returns a codec for the first key under which pkt
+// authenticates, or nil if none does.
+func matchWrapCodec(keys [][]byte, video bool, pkt []byte) *WrapCodec {
+	if !IsWrapRTP(pkt) {
+		return nil
+	}
+	for _, key := range keys {
+		codec, err := NewWrapCodec(key, video)
+		if err != nil {
+			continue
+		}
+		if _, err := codec.Unwrap(nil, pkt); err == nil {
+			return codec
+		}
+	}
+	return nil
+}
+
+// keyring derives wrap keys from a password source and caches them until the
+// source changes, so a flood of first packets does not repeat the HKDF work.
+type keyring struct {
+	src passwords.Source
+
+	mu   sync.Mutex
+	ch   <-chan struct{}
+	keys [][]byte
+	init bool
+}
+
+func newKeyring(src passwords.Source) *keyring { return &keyring{src: src} }
+
+func (k *keyring) Keys() [][]byte {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.init {
+		if k.ch == nil {
+			return k.keys // static source: never changes
+		}
+		select {
+		case <-k.ch:
+		default:
+			return k.keys
+		}
+	}
+	// Take the channel before the list so an update in between is not lost.
+	k.ch = k.src.Changed()
+	list := k.src.List()
+	keys := make([][]byte, 0, len(list))
+	for _, pw := range list {
+		if key, err := DeriveWrapKey(pw); err == nil {
+			keys = append(keys, key)
+		}
+	}
+	k.keys, k.init = keys, true
+	return k.keys
 }
 
 func listenSRTP(address string, cert tls.Certificate) (*Listener, error) {
